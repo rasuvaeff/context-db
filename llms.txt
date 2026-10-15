@@ -1,0 +1,57 @@
+# context-db
+
+Install:
+
+```
+composer require rasuvaeff/context-db
+```
+
+Turns the remaining `rasuvaeff/context` budget into a statement timeout the
+database server enforces itself. Namespace `Rasuvaeff\Context\Db`.
+
+## Rules
+
+- PHP 8.3+, `ext-pdo`, `rasuvaeff/context` ^0.3; `ext-pdo_mysql` / `ext-pdo_pgsql` per server.
+- `StatementTimeout::for(PDO $pdo, ?Dialect $dialect = null)` detects the dialect:
+  driver `mysql` + server version containing "MariaDB" → `MariaDb`, other
+  `mysql` → `MySql`, `pgsql` → `PostgreSql`, anything else → `Unsupported`.
+- The budget is read BEFORE `assertActive()`: a passing check guarantees ≥ 1 ms,
+  never 0 (0 = unlimited to every server). A terminated context throws.
+- MySQL limits ONLY read-only SELECT (hint on the main SELECT, also after a
+  `WITH` CTE list). DML, `INSERT … SELECT` and DDL run without a server limit.
+- An interrupted MySQL `SLEEP()` returns 1 instead of failing — test with real work.
+- PostgreSQL has no per-statement syntax: `apply()` throws `LogicException`; use `within()`.
+- A PostgreSQL timeout aborts the transaction (`25P02` until rollback) — the caller rolls back.
+- pgbouncer (transaction pooling): call `within()` inside a transaction → `SET LOCAL`.
+
+## API
+
+```php
+use Rasuvaeff\Context\Context;
+use Rasuvaeff\Context\Db\Dialect;
+use Rasuvaeff\Context\Db\StatementTimeout;
+
+$timeout = StatementTimeout::for($pdo);
+$timeout->dialect();                         // Dialect::MySql|MariaDb|PostgreSql|Unsupported
+
+$sql = $timeout->apply('SELECT 1', $ctx);
+// MySQL:   SELECT /*+ MAX_EXECUTION_TIME(1500) */ 1      (non-SELECT: unchanged)
+// MariaDB: SET STATEMENT max_statement_time=1.5 FOR SELECT 1  (any statement)
+// Unsupported: unchanged; no deadline: unchanged
+// existing MAX_EXECUTION_TIME / max_statement_time keeps the stricter value;
+// apply(apply($sql, a), b) === apply($sql, min(a, b))
+
+$rows = $timeout->within($ctx, fn () => $pdo->query($sql)->fetchAll());
+// session limit = remaining budget (stricter previous kept), restored afterwards,
+// also when the callback throws; PostgreSQL in a transaction → SET LOCAL
+// each statement inside gets the budget measured at entry
+
+try { ... } catch (\PDOException $e) {
+    throw $timeout->translate($e, $ctx);
+}
+// server timeout (MySQL 3024, MariaDB 1969, PostgreSQL 57014) and the deadline
+// passed or is within 50 ms → ContextExpiredException(previous: $e); else $e
+```
+
+yiisoft/db: `StatementTimeout::for($db->getActivePdo())`; the driver error is
+`$dbException->getPrevious()` (a `PDOException`).
