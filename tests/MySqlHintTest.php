@@ -66,6 +66,32 @@ final class MySqlHintTest
             'SELECT /*+ max_execution_time( 200 ) */ 1',
             'SELECT /*+ MAX_EXECUTION_TIME(200) */ 1',
         ];
+        yield 'division inside a cte' => [
+            'WITH x AS (SELECT 4/2 AS h) SELECT h FROM x',
+            "WITH x AS (SELECT 4/2 AS h) SELECT {$hint} h FROM x",
+        ];
+        yield 'minus inside a cte is not a comment' => [
+            'WITH x AS (SELECT 3 -1 AS v) SELECT v FROM x',
+            "WITH x AS (SELECT 3 -1 AS v) SELECT {$hint} v FROM x",
+        ];
+        yield 'backslash-escaped quote inside a cte' => [
+            "WITH x AS (SELECT '\\'' AS q) SELECT q FROM x",
+            "WITH x AS (SELECT '\\'' AS q) SELECT {$hint} q FROM x",
+        ];
+        yield 'underscore in a cte name' => [
+            'WITH my_cte AS (SELECT 1) SELECT * FROM my_cte',
+            "WITH my_cte AS (SELECT 1) SELECT {$hint} * FROM my_cte",
+        ];
+        yield 'dash comment ended by a control character' => ["--\x01\nSELECT 1", "--\x01\nSELECT {$hint} 1"];
+        yield 'two line comments' => ["# a\n-- b\nSELECT 1", "# a\n-- b\nSELECT {$hint} 1"];
+        yield 'empty block comment' => ['/**/SELECT 1', "/**/SELECT {$hint} 1"];
+        yield 'block comment touching the keyword' => ['/* c */SELECT 1', "/* c */SELECT {$hint} 1"];
+        yield 'a comment that starts with a slash' => ['/*/ SELECT */ SELECT 1', "/*/ SELECT */ SELECT {$hint} 1"];
+        yield 'double parentheses' => ['((SELECT 1))', "((SELECT {$hint} 1))"];
+        yield 'only the first limit in a hint counts' => [
+            'SELECT /*+ MAX_EXECUTION_TIME(9000) MAX_EXECUTION_TIME(100) */ 1',
+            'SELECT /*+ MAX_EXECUTION_TIME(1500) MAX_EXECUTION_TIME(100) */ 1',
+        ];
         yield 'unlimited existing limit' => [
             'SELECT /*+ MAX_EXECUTION_TIME(0) */ 1',
             'SELECT /*+ MAX_EXECUTION_TIME(1500) */ 1',
@@ -91,6 +117,8 @@ final class MySqlHintTest
         yield 'empty' => [''];
         yield 'whitespace' => ['   '];
         yield 'not a keyword boundary' => ['SELECTED'];
+        yield 'underscore is a word character' => ['SELECT_1'];
+        yield 'dollar is a word character' => ['SELECT$1'];
         yield 'with not a keyword' => ['WITHIN x'];
         yield 'versioned comment' => ['/*!50000 SELECT 1 */'];
         yield 'leading hint comment' => ['/*+ BKA(t) */ SELECT 1'];

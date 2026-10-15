@@ -72,6 +72,13 @@ docker run --rm --network host -v "$PWD":/app -w /app \
   cap first so a broken limit fails in seconds instead of hanging CI.
 - MariaDB accepts `SET STATEMENT … FOR` on any statement, including another
   `SET STATEMENT` (nesting) and prepared statements.
+- **Never route a server's decimal through a float.** `32.002 * 1000` is
+  `32002.000000000004` in floating point, and rounding it up gave 32003 ms;
+  rounding `0.0004 s` to the nearest millisecond gave 0 — *no limit* — and
+  `within()` restored that onto the session. `Internal\Decimal` shifts and
+  rounds the decimal string exactly; the previous session value is restored
+  as the normalised string it was read as. Both bugs were found by property
+  and mutation tests before the first release.
 - PostgreSQL: the previous value is read from `pg_settings.setting` (plain
   milliseconds, unlike `SHOW`'s "300ms"). Inside a PDO transaction
   `SET LOCAL` is used; a restore failing in an aborted transaction is

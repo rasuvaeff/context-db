@@ -38,7 +38,8 @@ final class MariaDbStatement
 
         $strictest = $milliseconds;
         foreach ($existing[1] as $value) {
-            $valueMs = (int) round((float) $value * 1_000.0);
+            // up, not to the nearest: 0.0004 s is a real limit, never 0 (none)
+            $valueMs = Decimal::ceilShifted($value, 3) ?? 0;
             if ($valueMs > 0 && $valueMs < $strictest) {
                 $strictest = $valueMs;
             }

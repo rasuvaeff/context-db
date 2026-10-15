@@ -176,6 +176,26 @@ final class StatementTimeoutTest
             'SET SESSION max_statement_time = 1.5',
             'SET SESSION max_statement_time = 30.25',
         ]];
+        yield 'mariadb keeps a sub-millisecond limit exactly' => [new FakePdo('mysql', current: '0.000400'), Dialect::MariaDb, [
+            'SELECT @@SESSION.max_statement_time',
+            'SET SESSION max_statement_time = 0.0004',
+            'SET SESSION max_statement_time = 0.0004',
+        ]];
+        yield 'mariadb keeps one second' => [new FakePdo('mysql', current: '1.000000'), Dialect::MariaDb, [
+            'SELECT @@SESSION.max_statement_time',
+            'SET SESSION max_statement_time = 1',
+            'SET SESSION max_statement_time = 1',
+        ]];
+        yield 'mariadb replaces ten seconds' => [new FakePdo('mysql', current: '10.000000'), Dialect::MariaDb, [
+            'SELECT @@SESSION.max_statement_time',
+            'SET SESSION max_statement_time = 1.5',
+            'SET SESSION max_statement_time = 10',
+        ]];
+        yield 'postgresql keeps a stricter limit' => [new FakePdo('pgsql', current: '1000'), Dialect::PostgreSql, [
+            "SELECT setting FROM pg_settings WHERE name = 'statement_timeout'",
+            'SET statement_timeout = 1000',
+            'SET statement_timeout = 1000',
+        ]];
         yield 'postgresql outside a transaction' => [new FakePdo('pgsql', current: '0'), Dialect::PostgreSql, [
             "SELECT setting FROM pg_settings WHERE name = 'statement_timeout'",
             'SET statement_timeout = 1500',
@@ -262,6 +282,7 @@ final class StatementTimeoutTest
     {
         yield 'query failed' => [null];
         yield 'not a number' => ['abc'];
+        yield 'negative' => [-1];
     }
 
     #[DataProvider('translateProvider')]

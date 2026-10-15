@@ -48,6 +48,18 @@ final class MariaDbStatementTest
             'SET STATEMENT max_statement_time=9, max_statement_time=0.002 FOR SELECT 1',
             'SET STATEMENT max_statement_time=0.002, max_statement_time=0.002 FOR SELECT 1',
         ];
+        yield 'sub-millisecond existing limit stays a limit' => [
+            'SET STATEMENT max_statement_time=.0004 FOR SELECT 1',
+            'SET STATEMENT max_statement_time=0.001 FOR SELECT 1',
+        ];
+        yield 'one second is stricter than 1.25' => [
+            'SET STATEMENT max_statement_time=1 FOR SELECT 1',
+            'SET STATEMENT max_statement_time=1 FOR SELECT 1',
+        ];
+        yield 'ten seconds is looser than 1.25' => [
+            'SET STATEMENT max_statement_time=10 FOR SELECT 1',
+            'SET STATEMENT max_statement_time=1.25 FOR SELECT 1',
+        ];
         yield 'empty' => ['', ''];
         yield 'whitespace' => ['  ', '  '];
     }

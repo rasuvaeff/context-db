@@ -6,6 +6,7 @@ namespace Rasuvaeff\Context\Db;
 
 use Rasuvaeff\Context\Context;
 use Rasuvaeff\Context\ContextExpiredException;
+use Rasuvaeff\Context\Db\Internal\Decimal;
 use Rasuvaeff\Context\Db\Internal\DialectDetector;
 use Rasuvaeff\Context\Db\Internal\MariaDbStatement;
 use Rasuvaeff\Context\Db\Internal\MySqlHint;
@@ -106,25 +107,26 @@ final readonly class StatementTimeout
         return match ($this->dialect) {
             Dialect::MySql => $this->scoped(
                 read: 'SELECT @@SESSION.max_execution_time',
-                set: static fn(int $ms): string => 'SET SESSION max_execution_time = ' . $ms,
+                set: 'SET SESSION max_execution_time = ',
+                budget: (string) $milliseconds,
                 milliseconds: $milliseconds,
-                scale: 1.0,
+                shift: 0,
                 callback: $callback,
             ),
             Dialect::MariaDb => $this->scoped(
                 read: 'SELECT @@SESSION.max_statement_time',
-                set: static fn(int $ms): string => 'SET SESSION max_statement_time = ' . ($ms > 0 ? MariaDbStatement::seconds($ms) : '0'),
+                set: 'SET SESSION max_statement_time = ',
+                budget: MariaDbStatement::seconds($milliseconds),
                 milliseconds: $milliseconds,
-                scale: 1_000.0,
+                shift: 3,
                 callback: $callback,
             ),
             Dialect::PostgreSql => $this->scoped(
                 read: "SELECT setting FROM pg_settings WHERE name = 'statement_timeout'",
-                set: $this->pdo->inTransaction()
-                    ? static fn(int $ms): string => 'SET LOCAL statement_timeout = ' . $ms
-                    : static fn(int $ms): string => 'SET statement_timeout = ' . $ms,
+                set: $this->pdo->inTransaction() ? 'SET LOCAL statement_timeout = ' : 'SET statement_timeout = ',
+                budget: (string) $milliseconds,
                 milliseconds: $milliseconds,
-                scale: 1.0,
+                shift: 0,
                 callback: $callback,
             ),
             default => $callback(),
@@ -169,24 +171,37 @@ final readonly class StatementTimeout
     /**
      * @template T
      *
-     * @param \Closure(int): string $set builds the statement for a value in milliseconds
+     * The previous value is restored exactly as read (normalised, never
+     * rounded): rounding a MariaDB limit of 0.0004 s to whole milliseconds
+     * would restore 0 — no limit at all. It counts as stricter than the
+     * budget when its value, rounded UP to milliseconds, is smaller.
+     *
+     * @param string $set the statement prefix the value is appended to
+     * @param string $budget the budget in the setting's own unit
      * @param positive-int $milliseconds
-     * @param float $scale milliseconds per unit of the value `$read` returns
+     * @param int<0, max> $shift decimal places from the setting's unit to milliseconds
      * @param callable(): T $callback
      *
      * @return T
      */
-    private function scoped(string $read, \Closure $set, int $milliseconds, float $scale, callable $callback): mixed
-    {
-        $previousMs = $this->readMs($read, $scale);
-        $value = $previousMs > 0 && $previousMs < $milliseconds ? $previousMs : $milliseconds;
-        $this->pdo->exec($set($value));
+    private function scoped(
+        string $read,
+        string $set,
+        string $budget,
+        int $milliseconds,
+        int $shift,
+        callable $callback,
+    ): mixed {
+        $previous = $this->readSetting($read);
+        $previousMs = Decimal::ceilShifted($previous, $shift) ?? 0;
+        $restore = $set . $previous;
+        $this->pdo->exec($previousMs > 0 && $previousMs < $milliseconds ? $restore : $set . $budget);
 
         try {
             $result = $callback();
         } catch (\Throwable $error) {
             try {
-                $this->pdo->exec($set($previousMs));
+                $this->pdo->exec($restore);
             } catch (\Throwable) {
                 // The callback's error is the one to report; a restore that
                 // fails here (an aborted PostgreSQL transaction) is reset by
@@ -196,20 +211,26 @@ final readonly class StatementTimeout
             throw $error;
         }
 
-        $this->pdo->exec($set($previousMs));
+        $this->pdo->exec($restore);
 
         return $result;
     }
 
-    private function readMs(string $sql, float $scale): int
+    /** The current setting as a normalised plain decimal ("30.25", "0"). */
+    private function readSetting(string $sql): string
     {
         $statement = $this->pdo->query($sql);
-        $value = $statement === false ? false : $statement->fetchColumn();
-        if (!is_numeric($value)) {
+        $decimal = $this->decimal($statement === false ? false : $statement->fetchColumn());
+        if ($decimal === null) {
             throw new \RuntimeException(\sprintf('Cannot read the current statement timeout with "%s"', $sql));
         }
 
-        return max(0, (int) round((float) $value * $scale));
+        return $decimal;
+    }
+
+    private function decimal(mixed $value): ?string
+    {
+        return \is_int($value) || \is_string($value) ? Decimal::normalize((string) $value) : null;
     }
 
     private function isTimeout(\PDOException $error): bool
