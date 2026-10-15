@@ -228,8 +228,18 @@ final readonly class StatementTimeout
         return $decimal;
     }
 
+    /**
+     * pdo_mysql returns native numbers since PHP 8.1: MariaDB's
+     * max_statement_time arrives as a float. It is formatted with the
+     * server's own precision (microseconds) — a bare (string) cast would
+     * give "1.0E-5" for 0.00001 s, which is not a decimal at all.
+     */
     private function decimal(mixed $value): ?string
     {
+        if (\is_float($value)) {
+            $value = \is_finite($value) ? \sprintf('%.6F', $value) : null;
+        }
+
         return \is_int($value) || \is_string($value) ? Decimal::normalize((string) $value) : null;
     }
 

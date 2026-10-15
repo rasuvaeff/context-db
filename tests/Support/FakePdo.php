@@ -56,7 +56,9 @@ final class FakePdo extends \PDO
             return false;
         }
 
-        return parent::query('SELECT ' . $this->quote((string) $this->current));
+        // A float or int answers as a native number, the way pdo_mysql
+        // returns them since PHP 8.1; a string answers as a string.
+        return parent::query('SELECT ' . (\is_string($this->current) ? $this->quote($this->current) : var_export($this->current, return: true)));
     }
 
     #[\Override]

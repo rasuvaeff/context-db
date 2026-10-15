@@ -191,6 +191,28 @@ final class StatementTimeoutTest
             'SET SESSION max_statement_time = 1.5',
             'SET SESSION max_statement_time = 10',
         ]];
+        // pdo_mysql returns native numbers since PHP 8.1: MariaDB's setting
+        // arrives as a float (found by the live MariaDB integration run).
+        yield 'mariadb native float zero' => [new FakePdo('mysql', current: 0.0), Dialect::MariaDb, [
+            'SELECT @@SESSION.max_statement_time',
+            'SET SESSION max_statement_time = 1.5',
+            'SET SESSION max_statement_time = 0',
+        ]];
+        yield 'mariadb native float fraction' => [new FakePdo('mysql', current: 30.25), Dialect::MariaDb, [
+            'SELECT @@SESSION.max_statement_time',
+            'SET SESSION max_statement_time = 1.5',
+            'SET SESSION max_statement_time = 30.25',
+        ]];
+        yield 'mariadb native float that a string cast would print as 1.0E-5' => [new FakePdo('mysql', current: 0.00001), Dialect::MariaDb, [
+            'SELECT @@SESSION.max_statement_time',
+            'SET SESSION max_statement_time = 0.00001',
+            'SET SESSION max_statement_time = 0.00001',
+        ]];
+        yield 'mysql native int' => [new FakePdo('mysql', current: 0), Dialect::MySql, [
+            'SELECT @@SESSION.max_execution_time',
+            'SET SESSION max_execution_time = 1500',
+            'SET SESSION max_execution_time = 0',
+        ]];
         yield 'postgresql keeps a stricter limit' => [new FakePdo('pgsql', current: '1000'), Dialect::PostgreSql, [
             "SELECT setting FROM pg_settings WHERE name = 'statement_timeout'",
             'SET statement_timeout = 1000',
