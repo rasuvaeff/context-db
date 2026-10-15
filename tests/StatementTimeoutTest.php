@@ -314,14 +314,15 @@ final class StatementTimeoutTest
         $error->errorInfo = $errorInfo;
         $clock = new FakeTimeSource();
         $subject = match ($context) {
-            'expired' => Context::background($clock)->withTimeout(1.0)[0],
-            'within tolerance' => Context::background($clock)->withTimeout(1.0)[0],
+            'no deadline' => Context::background($clock),
             'far from the deadline' => Context::background($clock)->withTimeout(10.0)[0],
-            default => Context::background($clock),
+            default => Context::background($clock)->withTimeout(1.0)[0],
         };
         $clock->advanceMs(match ($context) {
             'expired' => 1_500,
-            'within tolerance' => 960,
+            'within tolerance' => 995,
+            'sub-millisecond left' => 999.6,
+            'just outside the tolerance' => 994,
             default => 0,
         });
 
@@ -346,7 +347,9 @@ final class StatementTimeoutTest
         $pdo = \PDOException::class;
 
         yield 'mysql timeout, expired' => [Dialect::MySql, $mysql, 'expired', $expired];
-        yield 'mysql timeout, within tolerance' => [Dialect::MySql, $mysql, 'within tolerance', $expired];
+        yield 'mysql timeout, 5 ms left (within tolerance)' => [Dialect::MySql, $mysql, 'within tolerance', $expired];
+        yield 'mysql timeout, 0.4 ms left (rounding)' => [Dialect::MySql, $mysql, 'sub-millisecond left', $expired];
+        yield 'mysql timeout, 6 ms left (a stricter limit set elsewhere)' => [Dialect::MySql, $mysql, 'just outside the tolerance', $pdo];
         yield 'mysql timeout, far from the deadline' => [Dialect::MySql, $mysql, 'far from the deadline', $pdo];
         yield 'mysql timeout, no deadline' => [Dialect::MySql, $mysql, 'no deadline', $pdo];
         yield 'mysql other error' => [Dialect::MySql, $other, 'expired', $pdo];

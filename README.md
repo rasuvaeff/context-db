@@ -109,7 +109,8 @@ is kept.
 
 Returns `ContextExpiredException` (the driver error as `previous`) when the
 error is the server's statement timeout and the context's deadline has passed
-or is within 50 ms; any other error — or a timeout while plenty of budget is
+or is within 5 ms (the server can fire early only by rounding the budget down
+to whole milliseconds); any other error — or a timeout while more budget is
 left, i.e. a limit set elsewhere — is returned unchanged.
 
 ### yiisoft/db

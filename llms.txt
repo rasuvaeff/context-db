@@ -50,7 +50,7 @@ try { ... } catch (\PDOException $e) {
     throw $timeout->translate($e, $ctx);
 }
 // server timeout (MySQL 3024, MariaDB 1969, PostgreSQL 57014) and the deadline
-// passed or is within 50 ms → ContextExpiredException(previous: $e); else $e
+// passed or is within 5 ms → ContextExpiredException(previous: $e); else $e
 ```
 
 yiisoft/db: `StatementTimeout::for($db->getActivePdo())`; the driver error is

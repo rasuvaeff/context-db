@@ -23,8 +23,16 @@ final readonly class StatementTimeout
     /**
      * A server-side timeout that fires this close to the deadline is the
      * budget running out, even if the client clock has not passed it yet.
+     *
+     * The server can fire *before* our deadline only through rounding: it
+     * gets floor(remainingMs), and remainingMs() reports 1.0 for anything
+     * under a millisecond — under 1 ms in total. Every other delay (network,
+     * the gap between reading the budget and sending the statement, a late
+     * server timer) moves the error past the deadline, where isExpired()
+     * already holds. A wider window would mistake a stricter limit set
+     * elsewhere (kept by apply()/within()) for our budget.
      */
-    private const float EXPIRY_TOLERANCE_MS = 50.0;
+    private const float EXPIRY_TOLERANCE_MS = 5.0;
 
     private const int MYSQL_QUERY_TIMEOUT = 3024;
 
