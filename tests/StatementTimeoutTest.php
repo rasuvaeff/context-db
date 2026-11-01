@@ -85,6 +85,34 @@ final class StatementTimeoutTest
         Assert::same($timeout->apply('SELECT 1', $context), 'SELECT /*+ MAX_EXECUTION_TIME(1) */ 1');
     }
 
+    public function aSessionBudgetUnderAMillisecondIsStillALimit(): void
+    {
+        [$context] = Context::background(new FakeTimeSource())->withTimeout(0.000_4);
+        $pdo = new FakePdo('mysql', current: 0);
+
+        StatementTimeout::for($pdo, Dialect::MySql)->within($context, static fn(): bool => true);
+
+        Assert::same($pdo->statements, [
+            'SELECT @@SESSION.max_execution_time',
+            'SET SESSION max_execution_time = 1',
+            'SET SESSION max_execution_time = 0',
+        ]);
+    }
+
+    public function aPreviousLimitEqualToTheBudgetIsReplacedNotKept(): void
+    {
+        [$context] = Context::background(new FakeTimeSource())->withTimeout(0.000_4);
+        $pdo = new FakePdo('mysql', current: '0.0004');
+
+        StatementTimeout::for($pdo, Dialect::MariaDb)->within($context, static fn(): bool => true);
+
+        Assert::same($pdo->statements, [
+            'SELECT @@SESSION.max_statement_time',
+            'SET SESSION max_statement_time = 0.001',
+            'SET SESSION max_statement_time = 0.0004',
+        ]);
+    }
+
     public function postgresqlHasNoPerStatementSyntax(): void
     {
         Expect::exception(\LogicException::class);
