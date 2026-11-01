@@ -39,6 +39,7 @@ final class DecimalTest
         yield 'leading zeros do not count as digits' => ['00000000000000000000001', 0, 1];
         yield 'beyond int' => ['99999999999999999999', 0, \PHP_INT_MAX];
         yield 'empty' => ['', 0, null];
+        yield 'only whitespace' => ["  \n", 0, null];
         yield 'only a dot' => ['.', 0, null];
         yield 'negative' => ['-1', 0, null];
         yield 'exponent' => ['1e3', 0, null];
@@ -62,6 +63,7 @@ final class DecimalTest
         yield 'sub-millisecond' => ['0.000400', '0.0004'];
         yield 'not a decimal' => ['1e3', null];
         yield 'empty' => ['', null];
+        yield 'only whitespace' => ["  \n", null];
     }
 
     /**

@@ -83,6 +83,14 @@ final class MySqlHintTest
             "WITH my_cte AS (SELECT 1) SELECT {$hint} * FROM my_cte",
         ];
         yield 'dash comment ended by a control character' => ["--\x01\nSELECT 1", "--\x01\nSELECT {$hint} 1"];
+        yield 'a quote followed by a zero closes the string' => [
+            "WITH x AS (SELECT 'a'0) SELECT 1 FROM x",
+            "WITH x AS (SELECT 'a'0) SELECT {$hint} 1 FROM x",
+        ];
+        yield 'space before the comma between ctes' => [
+            'WITH a AS (SELECT 1) , b AS (SELECT 2) SELECT 3',
+            "WITH a AS (SELECT 1) , b AS (SELECT 2) SELECT {$hint} 3",
+        ];
         yield 'two line comments' => ["# a\n-- b\nSELECT 1", "# a\n-- b\nSELECT {$hint} 1"];
         yield 'empty block comment' => ['/**/SELECT 1', "/**/SELECT {$hint} 1"];
         yield 'block comment touching the keyword' => ['/* c */SELECT 1', "/* c */SELECT {$hint} 1"];
@@ -133,6 +141,10 @@ final class MySqlHintTest
         yield 'unterminated comment in cte' => ['WITH x AS (SELECT 1 /* ) SELECT 2'];
         yield 'nothing after the ctes' => ['WITH x AS (SELECT 1)'];
         yield 'dashes without a space are not a comment' => ['--x SELECT 1'];
+        yield 'dashes and a letter before a newline are not a comment' => ["--x\nSELECT 1"];
+        yield 'a slash is not a comment start' => ['/ x */ SELECT 1'];
+        yield 'cte without a name before a body' => ['WITH (SELECT 1) AS (SELECT 2) SELECT 3'];
+        yield 'cte with a column list but no as' => ['WITH x (a) (SELECT 1) SELECT 2'];
     }
 
     public function aDashCommentAtTheVeryEndIsAComment(): void
