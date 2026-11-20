@@ -6,7 +6,6 @@ namespace Rasuvaeff\Context\Db\Tests\Integration;
 
 use Rasuvaeff\Context\Context;
 use Rasuvaeff\Context\ContextExpiredException;
-use Rasuvaeff\Context\Db\Dialect;
 use Rasuvaeff\Context\Db\StatementTimeout;
 use Testo\Assert;
 use Testo\Codecov\CoversNothing;
@@ -25,8 +24,8 @@ use Yiisoft\Test\Support\SimpleCache\MemorySimpleCache;
 
 /**
  * Executes the yiisoft/db recipe from the README as written: the PDO behind
- * the connection, `apply()` on the SQL handed to a command, and the
- * driver error unwrapped from yiisoft/db's exception for `translate()`.
+ * the connection, `run()` handing the limited SQL to a command, and
+ * yiisoft/db's exception passed to `translate()` as is.
  */
 #[Test]
 #[CoversNothing]
@@ -81,13 +80,9 @@ final class YiisoftDbIntegrationTest
         $timeout = StatementTimeout::for($db->getActivePdo());
 
         try {
-            $value = $timeout->dialect() === Dialect::PostgreSql
-                ? $timeout->within($context, static fn(): mixed => $db->createCommand($sql)->queryScalar())
-                : $db->createCommand($timeout->apply($sql, $context))->queryScalar();
+            $value = $timeout->run($sql, $context, static fn(string $sql): mixed => $db->createCommand($sql)->queryScalar());
         } catch (DbException $error) {
-            $driverError = $error->getPrevious();
-
-            throw $driverError instanceof \PDOException ? $timeout->translate($driverError, $context) : $error;
+            throw $timeout->translate($error, $context);
         }
 
         return \is_scalar($value) ? (string) $value : '';

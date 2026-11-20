@@ -51,16 +51,21 @@ $sql = $timeout->apply('SELECT 1', $ctx);
 // apply(apply($sql, a), b) === apply($sql, min(a, b))
 
 $rows = $timeout->within($ctx, fn () => $pdo->query($sql)->fetchAll());
-// session limit = remaining budget (stricter previous kept), restored afterwards,
+// session limit = remaining budget, restored afterwards (a stricter previous
+// limit is kept: no SET, no restore),
 // also when the callback throws; PostgreSQL in a transaction → SET LOCAL
 // each statement inside gets the budget measured at entry
 
-try { ... } catch (\PDOException $e) {
-    throw $timeout->translate($e, $ctx);
+$rows = $timeout->run($sql, $ctx, fn (string $sql) => $pdo->query($sql)->fetchAll());
+// any dialect: MySQL/MariaDB → $execute(apply($sql)), PostgreSQL → within(fn => $execute($sql))
+
+try { ... } catch (\Throwable $e) {
+    throw $timeout->translate($e, $ctx);   // PDOException found anywhere in the previous chain
 }
 // server timeout (MySQL 3024, MariaDB 1969, PostgreSQL 57014) and the deadline
 // passed or is within 5 ms → ContextExpiredException(previous: $e); else $e
 ```
 
-yiisoft/db: `StatementTimeout::for($db->getActivePdo())`; the driver error is
-`$dbException->getPrevious()` (a `PDOException`).
+yiisoft/db: `StatementTimeout::for($db->getActivePdo())`; `run()` with
+`fn (string $sql) => $db->createCommand($sql)->queryScalar()`; pass the
+yiisoft/db exception to `translate()` as is.
