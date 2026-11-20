@@ -52,6 +52,15 @@ package uses what each server offers — and each offers something different:
 - **A PostgreSQL timeout aborts the transaction.** Every further statement
   fails with `25P02` until the caller rolls back; this package never touches
   your transaction.
+- **On PostgreSQL, do not leave a transaction open across `within()`.**
+  PostgreSQL has no non-transactional `SET`: when `within()` is entered
+  outside a transaction and the callback opens one and returns (or throws)
+  with it still open, the restore runs inside that transaction (or fails with
+  `25P02` if a statement error aborted it), and the later rollback undoes it —
+  the session keeps the timeout set on entry: the budget, unless the previous
+  limit was stricter and was kept.
+  Either open and close the transaction inside the callback, or call
+  `within()` inside the transaction, so it uses `SET LOCAL`.
 - `within()` gives each statement the budget measured at entry, not what is
   left after the previous statement: keep calling `assertActive()` between
   statements.
@@ -149,7 +158,15 @@ on MySQL, MariaDB and PostgreSQL.
 
 `apply()` only inserts a number it computed itself — never caller input — and
 returns SQL it cannot parse unchanged, so it cannot turn a valid statement
-into a different one. Bind user values as parameters as usual. A budget that
+into a different one. Bind user values as parameters as usual.
+
+**Exception: MySQL `sql_mode=NO_BACKSLASH_ESCAPES`.** The MySQL scanner that
+finds the main SELECT treats `\` inside a string literal as an escape, which
+is the server default. Under `NO_BACKSLASH_ESCAPES` a literal ending in a
+backslash (`'C:\'`) is read as unterminated, and the hint can land inside a
+later string literal — changing that literal's value. Do not use `apply()` on
+MySQL connections in that mode (use `within()`), or keep backslashes out of
+literals by binding such values as parameters. A budget that
 came from another process must already be capped (see
 `rasuvaeff/context`'s `WireCodec`).
 

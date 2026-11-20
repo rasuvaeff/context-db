@@ -31,7 +31,13 @@ Namespace `Rasuvaeff\Context\Db\`.
 
 3. **PostgreSQL timeouts abort the transaction.** Roll back yourself; behind a
    transaction-pooling pgbouncer call `within()` inside a transaction so it
-   uses `SET LOCAL`.
+   uses `SET LOCAL`. Never leave a transaction open across `within()`: a
+   rollback after it undoes the restore and the session keeps the budget.
+   Safe forms: open and close the transaction inside the callback, or call
+   `within()` inside the transaction.
+
+   MySQL under `sql_mode=NO_BACKSLASH_ESCAPES`: do not use `apply()` — its
+   scanner treats `\` as an escape and can put the hint inside a literal.
 
 4. **`within()` gives each statement the budget measured at entry.** Keep
    calling `$ctx->assertActive()` between statements of a long scope.
