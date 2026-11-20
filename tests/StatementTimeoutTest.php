@@ -184,10 +184,8 @@ final class StatementTimeoutTest
             'SET SESSION max_execution_time = 1500',
             'SET SESSION max_execution_time = 0',
         ]];
-        yield 'mysql keeps a stricter session limit' => [new FakePdo('mysql', current: 800), Dialect::MySql, [
+        yield 'mysql keeps a stricter session limit without touching it' => [new FakePdo('mysql', current: 800), Dialect::MySql, [
             'SELECT @@SESSION.max_execution_time',
-            'SET SESSION max_execution_time = 800',
-            'SET SESSION max_execution_time = 800',
         ]];
         yield 'mysql replaces a looser session limit' => [new FakePdo('mysql', current: 9_000), Dialect::MySql, [
             'SELECT @@SESSION.max_execution_time',
@@ -204,15 +202,16 @@ final class StatementTimeoutTest
             'SET SESSION max_statement_time = 1.5',
             'SET SESSION max_statement_time = 30.25',
         ]];
-        yield 'mariadb keeps a sub-millisecond limit exactly' => [new FakePdo('mysql', current: '0.000400'), Dialect::MariaDb, [
+        yield 'mariadb keeps a sub-millisecond limit' => [new FakePdo('mysql', current: '0.000400'), Dialect::MariaDb, [
             'SELECT @@SESSION.max_statement_time',
-            'SET SESSION max_statement_time = 0.0004',
-            'SET SESSION max_statement_time = 0.0004',
         ]];
         yield 'mariadb keeps one second' => [new FakePdo('mysql', current: '1.000000'), Dialect::MariaDb, [
             'SELECT @@SESSION.max_statement_time',
-            'SET SESSION max_statement_time = 1',
-            'SET SESSION max_statement_time = 1',
+        ]];
+        yield 'mariadb replaces a limit just below the budget rounded up' => [new FakePdo('mysql', current: '1.499100'), Dialect::MariaDb, [
+            'SELECT @@SESSION.max_statement_time',
+            'SET SESSION max_statement_time = 1.5',
+            'SET SESSION max_statement_time = 1.4991',
         ]];
         yield 'mariadb replaces ten seconds' => [new FakePdo('mysql', current: '10.000000'), Dialect::MariaDb, [
             'SELECT @@SESSION.max_statement_time',
@@ -233,8 +232,11 @@ final class StatementTimeoutTest
         ]];
         yield 'mariadb native float that a string cast would print as 1.0E-5' => [new FakePdo('mysql', current: 0.00001), Dialect::MariaDb, [
             'SELECT @@SESSION.max_statement_time',
-            'SET SESSION max_statement_time = 0.00001',
-            'SET SESSION max_statement_time = 0.00001',
+        ]];
+        yield 'mariadb restores a native float exactly' => [new FakePdo('mysql', current: 10.00001), Dialect::MariaDb, [
+            'SELECT @@SESSION.max_statement_time',
+            'SET SESSION max_statement_time = 1.5',
+            'SET SESSION max_statement_time = 10.00001',
         ]];
         yield 'mysql native int' => [new FakePdo('mysql', current: 0), Dialect::MySql, [
             'SELECT @@SESSION.max_execution_time',
@@ -243,8 +245,6 @@ final class StatementTimeoutTest
         ]];
         yield 'postgresql keeps a stricter limit' => [new FakePdo('pgsql', current: '1000'), Dialect::PostgreSql, [
             "SELECT setting FROM pg_settings WHERE name = 'statement_timeout'",
-            'SET statement_timeout = 1000',
-            'SET statement_timeout = 1000',
         ]];
         yield 'postgresql outside a transaction' => [new FakePdo('pgsql', current: '0'), Dialect::PostgreSql, [
             "SELECT setting FROM pg_settings WHERE name = 'statement_timeout'",
@@ -265,6 +265,92 @@ final class StatementTimeoutTest
 
         Assert::same(StatementTimeout::for($pdo, Dialect::MySql)->within(Context::background(), static fn(): int => 7), 7);
         Assert::same($pdo->statements, []);
+    }
+
+    public function aStricterLimitStillRunsTheCallbackAndPassesItsErrorThrough(): void
+    {
+        $pdo = new FakePdo('mysql', current: 800);
+        $timeout = StatementTimeout::for($pdo, Dialect::MySql);
+        $error = new \RuntimeException('query failed');
+
+        Assert::same($timeout->within(Contexts::withBudget(1_500), static fn(): int => 7), 7);
+
+        try {
+            $timeout->within(Contexts::withBudget(1_500), static function () use ($error): never {
+                throw $error;
+            });
+        } catch (\RuntimeException $caught) {
+            Assert::same($caught, $error);
+            Assert::same($pdo->statements, ['SELECT @@SESSION.max_execution_time', 'SELECT @@SESSION.max_execution_time']);
+
+            return;
+        }
+
+        throw new \LogicException('the callback error was expected');
+    }
+
+    /**
+     * @param list<string> $statements
+     */
+    #[DataProvider('runProvider')]
+    public function runPicksThePerStatementLimitOrTheSessionLimit(FakePdo $pdo, Dialect $dialect, string $sent, array $statements): void
+    {
+        $result = StatementTimeout::for($pdo, $dialect)->run(
+            'SELECT * FROM t',
+            Contexts::withBudget(1_500),
+            static function (string $sql) use ($pdo): string {
+                $pdo->statements[] = 'run: ' . $sql;
+
+                return 'rows';
+            },
+        );
+
+        Assert::same($result, 'rows');
+        Assert::same($pdo->statements, [...\array_slice($statements, 0, 2), 'run: ' . $sent, ...\array_slice($statements, 2)]);
+    }
+
+    public static function runProvider(): iterable
+    {
+        yield 'mysql hint' => [new FakePdo('mysql'), Dialect::MySql, 'SELECT /*+ MAX_EXECUTION_TIME(1500) */ * FROM t', []];
+        yield 'mariadb prefix' => [new FakePdo('mysql'), Dialect::MariaDb, 'SET STATEMENT max_statement_time=1.5 FOR SELECT * FROM t', []];
+        yield 'postgresql session limit' => [new FakePdo('pgsql', current: '0'), Dialect::PostgreSql, 'SELECT * FROM t', [
+            "SELECT setting FROM pg_settings WHERE name = 'statement_timeout'",
+            'SET statement_timeout = 1500',
+            'SET statement_timeout = 0',
+        ]];
+        yield 'unsupported unchanged' => [new FakePdo('sqlite'), Dialect::Unsupported, 'SELECT * FROM t', []];
+    }
+
+    public function runWithoutADeadlineSendsTheSqlAsIs(): void
+    {
+        $pdo = new FakePdo('pgsql', current: '0');
+        $sent = null;
+
+        StatementTimeout::for($pdo, Dialect::PostgreSql)->run('SELECT 1', Context::background(), static function (string $sql) use (&$sent): void {
+            $sent = $sql;
+        });
+
+        Assert::same($sent, 'SELECT 1');
+        Assert::same($pdo->statements, []);
+    }
+
+    public function runRefusesATerminatedContext(): void
+    {
+        [$context, $controller] = Context::background()->withCancel();
+        $controller->cancel();
+        $ran = false;
+
+        try {
+            StatementTimeout::for(new FakePdo('mysql'), Dialect::MySql)->run('SELECT 1', $context, static function () use (&$ran): void {
+                $ran = true;
+            });
+        } catch (ContextCancelledException) {
+            Assert::false($ran);
+
+            return;
+        }
+
+        throw new \LogicException('a cancellation was expected');
     }
 
     public function withinRestoresWhenTheCallbackThrows(): void
@@ -387,6 +473,29 @@ final class StatementTimeoutTest
         yield 'postgresql timeout' => [Dialect::PostgreSql, $postgresql, 'expired', $expired];
         yield 'postgresql other error' => [Dialect::PostgreSql, $other, 'expired', $pdo];
         yield 'unsupported' => [Dialect::Unsupported, $mysql, 'expired', $pdo];
+    }
+
+    public function aTimeoutWrappedByAnotherExceptionIsFoundInTheChain(): void
+    {
+        $pdo = new \PDOException('server error');
+        $pdo->errorInfo = ['HY000', 3024, 'Query execution was interrupted'];
+        $wrapper = new \RuntimeException('SQLSTATE[HY000]: ...', previous: new \LogicException('middle', previous: $pdo));
+        $clock = new FakeTimeSource();
+        [$context] = Context::background($clock)->withTimeout(1.0);
+        $clock->advanceMs(1_500);
+
+        $result = StatementTimeout::for(new FakePdo('mysql'), Dialect::MySql)->translate($wrapper, $context);
+
+        Assert::instanceOf($result, ContextExpiredException::class);
+        Assert::same($result->getPrevious(), $wrapper);
+    }
+
+    public function anErrorWithoutAPdoExceptionInTheChainIsReturnedAsIs(): void
+    {
+        $error = new \RuntimeException('not a database error', previous: new \LogicException('cause'));
+        [$context] = Context::background(new FakeTimeSource())->withTimeout(0.0);
+
+        Assert::same(StatementTimeout::for(new FakePdo('mysql'), Dialect::MySql)->translate($error, $context), $error);
     }
 
     public function anErrorWithoutDriverInfoIsReturnedAsIs(): void

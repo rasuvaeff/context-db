@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.2.0 — 2026-11-20
+
+- Added: `StatementTimeout::run($sql, $context, $execute)` picks the
+  per-statement limit (MySQL, MariaDB) or `within()` (PostgreSQL) itself, so
+  dialect-independent code needs no branch; the yiisoft/db recipe uses it (#3).
+- Changed: `translate()` accepts any `\Throwable` and finds the
+  `PDOException` in its `previous` chain — a yiisoft/db exception can be
+  passed as is. The returned `ContextExpiredException` has the given error as
+  `previous` (#4).
+- Changed: `within()` sends neither the `SET` nor the restore when the
+  session already has a stricter limit — one round trip instead of three (#5).
+- Uses `Context::budgetMs()`; requires `rasuvaeff/context` ^0.5.
+
 ## 0.1.1 — 2026-11-20
 
 - Docs: PostgreSQL has no non-transactional `SET`, so a transaction the

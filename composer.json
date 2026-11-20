@@ -28,7 +28,7 @@
         "php": "8.3 - 8.5",
         "ext-ctype": "*",
         "ext-pdo": "*",
-        "rasuvaeff/context": "^0.3"
+        "rasuvaeff/context": "^0.5"
     },
     "require-dev": {
         "ergebnis/composer-normalize": "^2.51",

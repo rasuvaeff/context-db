@@ -116,12 +116,25 @@ try {
 Выставляет оставшийся бюджет таймаутом запроса для сессии, выполняет
 callback и восстанавливает прежнее значение — и когда callback бросил (неудача
 восстановления никогда не скрывает ошибку callback'а). Более строгое прежнее
-значение сохраняется.
+значение сохраняется: тогда ничего не выставляется и не восстанавливается,
+callback выполняется после единственного чтения.
 
-### `translate(\PDOException $error, Context $context): \Throwable`
+### `run(string $sql, Context $context, callable $execute): mixed`
 
-Возвращает `ContextExpiredException` (ошибка драйвера — `previous`), если это
-серверный таймаут запроса, а дедлайн контекста прошёл или до него не больше
+Не зависит от диалекта: `$execute` получает SQL для отправки. MySQL и MariaDB
+получают лимит на запрос от `apply()`, на PostgreSQL `$execute` выполняется
+внутри `within()`, для неподдерживаемого диалекта `$sql` не меняется.
+Возвращает то, что вернул `$execute`; завершённый контекст бросает до вызова
+`$execute`.
+
+```php
+$rows = $timeout->run($sql, $context, static fn(string $sql): array => $pdo->query($sql)->fetchAll());
+```
+
+### `translate(\Throwable $error, Context $context): \Throwable`
+
+Возвращает `ContextExpiredException` (`$error` — `previous`), если ошибка —
+или `PDOException` в её цепочке `previous` — это серверный таймаут запроса, а дедлайн контекста прошёл или до него не больше
 5 мс (раньше дедлайна сервер может сработать только из-за округления бюджета
 вниз до миллисекунд); любая другая ошибка — или таймаут при большем остатке бюджета, то есть
 лимит, выставленный не вами, — возвращается без изменений.
@@ -129,22 +142,18 @@ callback и восстанавливает прежнее значение — �
 ### yiisoft/db
 
 Соединения `yiisoft/db` отдают PDO и оборачивают ошибки драйвера в своё
-исключение с `PDOException` в `previous`:
+исключение с `PDOException` в `previous`; `translate()` принимает обёртку
+как есть:
 
 ```php
-use Rasuvaeff\Context\Db\Dialect;
 use Yiisoft\Db\Exception\Exception as DbException;
 
 $timeout = StatementTimeout::for($db->getActivePdo());
 
 try {
-    $value = $timeout->dialect() === Dialect::PostgreSql
-        ? $timeout->within($context, static fn(): mixed => $db->createCommand($sql)->queryScalar())
-        : $db->createCommand($timeout->apply($sql, $context))->queryScalar();
+    $value = $timeout->run($sql, $context, static fn(string $sql): mixed => $db->createCommand($sql)->queryScalar());
 } catch (DbException $error) {
-    $driverError = $error->getPrevious();
-
-    throw $driverError instanceof \PDOException ? $timeout->translate($driverError, $context) : $error;
+    throw $timeout->translate($error, $context);   // находит PDOException в цепочке
 }
 ```
 
@@ -155,7 +164,7 @@ MySQL, MariaDB и PostgreSQL.
 
 | Класс | Описание |
 |---|---|
-| `StatementTimeout` | `for(PDO, ?Dialect)`, `dialect()`, `apply()`, `within()`, `translate()` |
+| `StatementTimeout` | `for(PDO, ?Dialect)`, `dialect()`, `apply()`, `within()`, `run()`, `translate()` |
 | `Dialect` | `MySql`, `MariaDb`, `PostgreSql`, `Unsupported` — определяется по имени драйвера, а для `mysql` — по версии сервера |
 
 ## Безопасность

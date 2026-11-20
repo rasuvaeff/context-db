@@ -77,7 +77,7 @@ final readonly class StatementTimeout
             throw new \LogicException('PostgreSQL has no per-statement timeout syntax; use within()');
         }
 
-        $milliseconds = $this->budgetMs($context);
+        $milliseconds = $context->budgetMs();
         if ($milliseconds === null) {
             return $sql;
         }
@@ -92,7 +92,7 @@ final readonly class StatementTimeout
     /**
      * Runs `$callback` with the remaining budget as the session's statement
      * timeout and restores the previous value afterwards (a stricter previous
-     * value is kept). Each statement inside gets the budget measured at
+     * value is kept, and then nothing is set or restored). Each statement inside gets the budget measured at
      * entry: keep checking the context between statements. On PostgreSQL
      * inside a transaction `SET LOCAL` is used, which is what a transaction-
      * pooling pgbouncer requires.
@@ -107,7 +107,7 @@ final readonly class StatementTimeout
      */
     public function within(Context $context, callable $callback): mixed
     {
-        $milliseconds = $this->budgetMs($context);
+        $milliseconds = $context->budgetMs();
         if ($milliseconds === null) {
             return $callback();
         }
@@ -142,12 +142,38 @@ final readonly class StatementTimeout
     }
 
     /**
-     * Maps the server's own timeout error to {@see ContextExpiredException}
-     * (the original as `previous`) when it is this context's budget that ran
-     * out; any other error — or a timeout while budget remains, i.e. a limit
-     * set elsewhere — is returned unchanged.
+     * Runs `$sql` through `$execute` under the remaining budget, whatever the
+     * dialect: MySQL and MariaDB get {@see apply()}'s per-statement limit,
+     * PostgreSQL runs `$execute` {@see within()} a session limit, an
+     * unsupported dialect runs `$sql` unchanged. Without a deadline `$sql`
+     * runs as is.
+     *
+     * @template T
+     *
+     * @param callable(string): T $execute receives the SQL to send
+     *
+     * @return T
+     *
+     * @throws \Rasuvaeff\Context\ContextException when the context is terminated
      */
-    public function translate(\PDOException $error, Context $context): \Throwable
+    public function run(string $sql, Context $context, callable $execute): mixed
+    {
+        if ($this->dialect === Dialect::PostgreSql) {
+            return $this->within($context, static fn(): mixed => $execute($sql));
+        }
+
+        return $execute($this->apply($sql, $context));
+    }
+
+    /**
+     * Maps the server's own timeout error to {@see ContextExpiredException}
+     * (`$error` as `previous`) when it is this context's budget that ran
+     * out; any other error — or a timeout while budget remains, i.e. a limit
+     * set elsewhere — is returned unchanged. The server error is looked up
+     * in the `previous` chain, so a wrapper (yiisoft/db's `Exception`) can be
+     * passed as is.
+     */
+    public function translate(\Throwable $error, Context $context): \Throwable
     {
         $deadlineNs = $context->deadlineNs();
         if ($deadlineNs === null || !$this->isTimeout($error)) {
@@ -159,21 +185,6 @@ final readonly class StatementTimeout
         }
 
         return $error;
-    }
-
-    /**
-     * Reads the budget BEFORE the check: once assertActive() passes, it can
-     * never be the 0.0 of an expired context — and 0 means "no limit" to
-     * every server here.
-     *
-     * @return positive-int|null
-     */
-    private function budgetMs(Context $context): ?int
-    {
-        $remainingMs = $context->remainingMs();
-        $context->assertActive();
-
-        return $remainingMs === null ? null : max(1, (int) $remainingMs);
     }
 
     /**
@@ -202,8 +213,14 @@ final readonly class StatementTimeout
     ): mixed {
         $previous = $this->readSetting($read);
         $previousMs = Decimal::ceilShifted($previous, $shift) ?? 0;
+        if ($previousMs > 0 && $previousMs < $milliseconds) {
+            // A stricter limit already holds: setting it again and restoring
+            // it would be two round trips that change nothing.
+            return $callback();
+        }
+
         $restore = $set . $previous;
-        $this->pdo->exec($previousMs > 0 && $previousMs < $milliseconds ? $restore : $set . $budget);
+        $this->pdo->exec($set . $budget);
 
         try {
             $result = $callback();
@@ -251,9 +268,17 @@ final readonly class StatementTimeout
         return \is_int($value) || \is_string($value) ? Decimal::normalize((string) $value) : null;
     }
 
-    private function isTimeout(\PDOException $error): bool
+    private function isTimeout(\Throwable $error): bool
     {
-        $info = $error->errorInfo;
+        $cause = $error;
+        while (!$cause instanceof \PDOException) {
+            $cause = $cause->getPrevious();
+            if (!$cause instanceof \Throwable) {
+                return false;
+            }
+        }
+
+        $info = $cause->errorInfo;
         if (!\is_array($info)) {
             return false;
         }
