@@ -33,6 +33,8 @@ Namespace `Rasuvaeff\Context\Db\`.
    transaction-pooling pgbouncer call `within()` inside a transaction so it
    uses `SET LOCAL`. Never leave a transaction open across `within()`: a
    rollback after it undoes the restore and the session keeps the budget.
+   Safe forms: open and close the transaction inside the callback, or call
+   `within()` inside the transaction.
 
    MySQL under `sql_mode=NO_BACKSLASH_ESCAPES`: do not use `apply()` — its
    scanner treats `\` as an escape and can put the hint inside a literal.

@@ -55,8 +55,10 @@ package uses what each server offers — and each offers something different:
 - **On PostgreSQL, do not leave a transaction open across `within()`.**
   PostgreSQL has no non-transactional `SET`: when `within()` is entered
   outside a transaction and the callback opens one and returns (or throws)
-  with it still open, the restore runs inside that transaction, and a later
-  rollback undoes it — the session keeps the budget as its statement timeout.
+  with it still open, the restore runs inside that transaction (or fails with
+  `25P02` if a statement error aborted it), and the later rollback undoes it —
+  the session keeps the timeout set on entry: the budget, unless the previous
+  limit was stricter and was kept.
   Either open and close the transaction inside the callback, or call
   `within()` inside the transaction, so it uses `SET LOCAL`.
 - `within()` gives each statement the budget measured at entry, not what is
