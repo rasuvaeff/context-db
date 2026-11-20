@@ -9,6 +9,7 @@ use Rasuvaeff\Context\ContextExpiredException;
 use Rasuvaeff\Context\Db\StatementTimeout;
 use Testo\Assert;
 use Testo\Codecov\CoversNothing;
+use Testo\Data\DataProvider;
 use Testo\Test;
 
 /**
@@ -104,6 +105,69 @@ final class ServerTimeoutIntegrationTest
         }
 
         Assert::same($this->sessionLimit($pdo, 'pgsql'), '10000');
+    }
+
+    /**
+     * The safe forms on PostgreSQL: the callback opens and closes its own
+     * transaction, so the restore runs outside it and nothing undoes it.
+     */
+    #[DataProvider('ownTransactionEndingProvider')]
+    public function postgresqlRestoresAfterTheCallbackEndsItsOwnTransaction(bool $commit): void
+    {
+        if ($this->server() !== 'pgsql') {
+            Assert::true(actual: true);
+
+            return;
+        }
+
+        $pdo = $this->connect('pgsql');
+        [$context] = Context::background()->withTimeout(5.0);
+
+        StatementTimeout::for($pdo)->within($context, function () use ($pdo, $commit): void {
+            $pdo->beginTransaction();
+            Assert::true($this->isBudgetLimit($this->sessionLimit($pdo, 'pgsql')));
+            $commit ? $pdo->commit() : $pdo->rollBack();
+        });
+
+        Assert::same($this->sessionLimit($pdo, 'pgsql'), '10000');
+    }
+
+    public static function ownTransactionEndingProvider(): iterable
+    {
+        yield 'commit' => [true];
+        yield 'rollback' => [false];
+    }
+
+    /**
+     * Pins the documented limitation (#6): PostgreSQL has no
+     * non-transactional SET, so a restore that runs inside a transaction the
+     * callback left open is undone by the caller's later rollback, and the
+     * session keeps the budget.
+     */
+    public function postgresqlLosesTheRestoreToARollbackOfATransactionLeftOpen(): void
+    {
+        if ($this->server() !== 'pgsql') {
+            Assert::true(actual: true);
+
+            return;
+        }
+
+        $pdo = $this->connect('pgsql');
+        [$context] = Context::background()->withTimeout(5.0);
+
+        StatementTimeout::for($pdo)->within($context, static function () use ($pdo): void {
+            $pdo->beginTransaction();
+        });
+        Assert::same($this->sessionLimit($pdo, 'pgsql'), '10000');
+        $pdo->rollBack();
+
+        Assert::true($this->isBudgetLimit($this->sessionLimit($pdo, 'pgsql')));
+    }
+
+    /** The 5 s budget as PostgreSQL stores it: whole ms measured at entry, under the 10 s cap. */
+    private function isBudgetLimit(string $setting): bool
+    {
+        return (int) $setting > 4_000 && (int) $setting <= 5_000;
     }
 
     public function mariaDbLimitsDataChangingStatementsToo(): void

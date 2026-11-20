@@ -23,6 +23,13 @@ database server enforces itself. Namespace `Rasuvaeff\Context\Db`.
 - PostgreSQL has no per-statement syntax: `apply()` throws `LogicException`; use `within()`.
 - A PostgreSQL timeout aborts the transaction (`25P02` until rollback) — the caller rolls back.
 - pgbouncer (transaction pooling): call `within()` inside a transaction → `SET LOCAL`.
+- PostgreSQL: never leave a transaction open across `within()` (entered outside
+  a transaction, callback opens one and exits with it open): the restore runs
+  inside it and a later rollback undoes it — the session keeps the budget.
+  Open and close it inside the callback, or call `within()` inside it.
+- MySQL `sql_mode=NO_BACKSLASH_ESCAPES`: the hint scanner treats `\` as an
+  escape; a literal ending in `\` can make `apply()` put the hint inside a
+  later literal. Use `within()` (or bind such values) in that mode.
 
 ## API
 
