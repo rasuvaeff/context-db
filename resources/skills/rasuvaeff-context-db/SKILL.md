@@ -4,7 +4,8 @@ description: >-
   Database-side statement timeouts from a rasuvaeff/context budget with
   rasuvaeff/context-db — StatementTimeout::for(PDO), apply() (MySQL
   MAX_EXECUTION_TIME hint, MariaDB SET STATEMENT max_statement_time),
-  within() (session / SET LOCAL statement_timeout on PostgreSQL), translate()
+  within() (session / SET LOCAL statement_timeout on PostgreSQL),
+  transaction() (owns a transaction, SET LOCAL on PostgreSQL), translate()
   of server timeout errors into ContextExpiredException, and the yiisoft/db
   recipe. Use when a request or job budget must stop a slow SQL query on the
   server, or when reviewing such code.
@@ -31,10 +32,14 @@ Namespace `Rasuvaeff\Context\Db\`.
 
 3. **PostgreSQL timeouts abort the transaction.** Roll back yourself; behind a
    transaction-pooling pgbouncer call `within()` inside a transaction so it
-   uses `SET LOCAL`. Never leave a transaction open across `within()`: a
-   rollback after it undoes the restore and the session keeps the budget.
-   Safe forms: open and close the transaction inside the callback, or call
-   `within()` inside the transaction.
+   uses `SET LOCAL`. `within()` entered outside a transaction throws
+   `LogicException` when the callback returns with a transaction open (a
+   rollback would undo the restore and keep the budget); a callback that
+   throws with one open keeps its error and may still lose the restore.
+   Safe forms: `$timeout->transaction($ctx, fn)` (owns the transaction,
+   `SET LOCAL`), `within()` inside your transaction, or open and close the
+   transaction inside the callback. With yiisoft/db use `within()`/`run()`
+   inside `$db->transaction()`, not `transaction()`.
 
    MySQL under `sql_mode=NO_BACKSLASH_ESCAPES`: do not use `apply()` — its
    scanner treats `\` as an escape and can put the hint inside a literal.

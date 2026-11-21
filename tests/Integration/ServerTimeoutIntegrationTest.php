@@ -139,12 +139,12 @@ final class ServerTimeoutIntegrationTest
     }
 
     /**
-     * Pins the documented limitation (#6): PostgreSQL has no
-     * non-transactional SET, so a restore that runs inside a transaction the
-     * callback left open is undone by the caller's later rollback, and the
-     * session keeps the budget.
+     * #6: PostgreSQL has no non-transactional SET, so a restore that runs
+     * inside a transaction the callback left open would be undone by the
+     * caller's later rollback, and the session would keep the budget.
+     * within() refuses that pattern instead of leaking silently.
      */
-    public function postgresqlLosesTheRestoreToARollbackOfATransactionLeftOpen(): void
+    public function postgresqlRefusesATransactionLeftOpenAcrossWithin(): void
     {
         if ($this->server() !== 'pgsql') {
             Assert::true(actual: true);
@@ -155,13 +155,85 @@ final class ServerTimeoutIntegrationTest
         $pdo = $this->connect('pgsql');
         [$context] = Context::background()->withTimeout(5.0);
 
+        try {
+            StatementTimeout::for($pdo)->within($context, static function () use ($pdo): void {
+                $pdo->beginTransaction();
+            });
+        } catch (\LogicException $error) {
+            Assert::string($error->getMessage())->contains('transaction');
+
+            return;
+        } finally {
+            if ($pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
+        }
+
+        throw new \LogicException('within() was expected to refuse a transaction left open');
+    }
+
+    /**
+     * transaction() owns the transaction: whether it commits or a server
+     * timeout makes it roll back, the session keeps the limit it had before.
+     */
+    public function transactionLeavesNoLimitBehind(): void
+    {
+        $server = $this->server();
+        if ($server === null) {
+            Assert::true(actual: true);
+
+            return;
+        }
+
+        $pdo = $this->connect($server);
+        $timeout = StatementTimeout::for($pdo);
+        $before = $this->sessionLimit($pdo, $server);
+        [$context] = Context::background()->withTimeout(5.0);
+
+        $result = $timeout->transaction($context, static function () use ($pdo): int {
+            Assert::true($pdo->inTransaction());
+
+            return (int) $pdo->query('SELECT 1')->fetchColumn();
+        });
+
+        Assert::same($result, 1);
+        Assert::false($pdo->inTransaction());
+        Assert::same($this->sessionLimit($pdo, $server), $before);
+
+        $this->assertStopped($timeout, static function (Context $context) use ($pdo, $timeout, $server): void {
+            $timeout->transaction($context, static function () use ($pdo, $server): void {
+                $pdo->query($server === 'pgsql' ? 'SELECT pg_sleep(10)' : 'SELECT COUNT(*) FROM ' . self::crossJoin());
+            });
+        });
+
+        Assert::false($pdo->inTransaction());
+        Assert::same($this->sessionLimit($pdo, $server), $before);
+    }
+
+    /**
+     * MySQL and MariaDB session variables are not transactional: a
+     * transaction the callback leaves open and the caller rolls back later
+     * does not undo the restore (the #6 leak is PostgreSQL-only).
+     */
+    public function mysqlAndMariaDbKeepTheRestoreThroughALaterRollback(): void
+    {
+        $server = $this->server();
+        if ($server === null || $server === 'pgsql') {
+            Assert::true(actual: true);
+
+            return;
+        }
+
+        $pdo = $this->connect($server);
+        $before = $this->sessionLimit($pdo, $server);
+        [$context] = Context::background()->withTimeout(5.0);
+
         StatementTimeout::for($pdo)->within($context, static function () use ($pdo): void {
             $pdo->beginTransaction();
         });
-        Assert::same($this->sessionLimit($pdo, 'pgsql'), '10000');
         $pdo->rollBack();
 
-        Assert::true($this->isBudgetLimit($this->sessionLimit($pdo, 'pgsql')));
+        Assert::same($this->sessionLimit($pdo, $server), $before);
     }
 
     /** The 5 s budget as PostgreSQL stores it: whole ms measured at entry, under the 10 s cap. */

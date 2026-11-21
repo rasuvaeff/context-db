@@ -259,6 +259,192 @@ final class StatementTimeoutTest
         yield 'unsupported' => [new FakePdo('sqlite'), Dialect::Unsupported, []];
     }
 
+    #[DataProvider('leftOpenProvider')]
+    public function postgresqlRefusesATransactionLeftOpenByTheCallback(string $current): void
+    {
+        $pdo = new FakePdo('pgsql', current: $current);
+
+        try {
+            StatementTimeout::for($pdo, Dialect::PostgreSql)
+                ->within(Contexts::withBudget(1_500), static fn(): bool => $pdo->beginTransaction());
+        } catch (\LogicException $error) {
+            Assert::string($error->getMessage())->contains('left a transaction open');
+            Assert::same($pdo->statements[\count($pdo->statements) - 1], $current === '0' ? 'SET statement_timeout = 0' : 'BEGIN');
+
+            return;
+        }
+
+        throw new \LogicException('a refusal was expected');
+    }
+
+    public static function leftOpenProvider(): iterable
+    {
+        yield 'after the restore' => ['0'];
+        yield 'with a stricter limit kept' => ['1000'];
+    }
+
+    public function postgresqlRefusesATransactionLeftOpenWithoutADeadlineToo(): void
+    {
+        $pdo = new FakePdo('pgsql', current: '0');
+
+        try {
+            StatementTimeout::for($pdo, Dialect::PostgreSql)
+                ->within(Context::background(), static fn(): bool => $pdo->beginTransaction());
+        } catch (\LogicException) {
+            Assert::same($pdo->statements, ['BEGIN']);
+
+            return;
+        }
+
+        throw new \LogicException('a refusal was expected');
+    }
+
+    public function withoutADeadlineOtherDialectsIgnoreATransactionLeftOpen(): void
+    {
+        $pdo = new FakePdo('mysql', current: 0);
+
+        Assert::true(StatementTimeout::for($pdo, Dialect::MySql)->within(Context::background(), static fn(): bool => $pdo->beginTransaction()));
+    }
+
+    public function postgresqlAcceptsATransactionTheCallbackEnds(): void
+    {
+        $pdo = new FakePdo('pgsql', current: '0');
+
+        $result = StatementTimeout::for($pdo, Dialect::PostgreSql)->within(Contexts::withBudget(1_500), static function () use ($pdo): int {
+            $pdo->beginTransaction();
+            $pdo->commit();
+
+            return 7;
+        });
+
+        Assert::same($result, 7);
+    }
+
+    public function postgresqlAcceptsATransactionEndedByTheCallbackItWasCalledIn(): void
+    {
+        $pdo = new FakePdo('pgsql', current: '0', transaction: true);
+
+        $result = StatementTimeout::for($pdo, Dialect::PostgreSql)->within(Contexts::withBudget(1_500), static function () use ($pdo): int {
+            $pdo->commit();
+
+            return 7;
+        });
+
+        Assert::same($result, 7);
+    }
+
+    public function aCallbackErrorIsKeptWhenItLeavesATransactionOpen(): void
+    {
+        $pdo = new FakePdo('pgsql', current: '0');
+        $error = new \PDOException('canceling statement due to statement timeout');
+
+        try {
+            StatementTimeout::for($pdo, Dialect::PostgreSql)->within(Contexts::withBudget(1_500), static function () use ($pdo, $error): never {
+                $pdo->beginTransaction();
+
+                throw $error;
+            });
+        } catch (\PDOException $caught) {
+            Assert::same($caught, $error);
+
+            return;
+        }
+
+        throw new \LogicException('the callback error was expected');
+    }
+
+    /**
+     * @param list<string> $expected
+     */
+    #[DataProvider('transactionProvider')]
+    public function transactionCommitsAroundTheLimit(FakePdo $pdo, Dialect $dialect, array $expected): void
+    {
+        $result = StatementTimeout::for($pdo, $dialect)->transaction(Contexts::withBudget(1_500), static fn(): string => 'done');
+
+        Assert::same($result, 'done');
+        Assert::same($pdo->statements, $expected);
+        Assert::false($pdo->inTransaction());
+    }
+
+    public static function transactionProvider(): iterable
+    {
+        yield 'postgresql' => [new FakePdo('pgsql', current: '0'), Dialect::PostgreSql, [
+            'BEGIN',
+            "SELECT setting FROM pg_settings WHERE name = 'statement_timeout'",
+            'SET LOCAL statement_timeout = 1500',
+            'SET LOCAL statement_timeout = 0',
+            'COMMIT',
+        ]];
+        yield 'mysql' => [new FakePdo('mysql', current: 0), Dialect::MySql, [
+            'BEGIN',
+            'SELECT @@SESSION.max_execution_time',
+            'SET SESSION max_execution_time = 1500',
+            'SET SESSION max_execution_time = 0',
+            'COMMIT',
+        ]];
+        yield 'unsupported' => [new FakePdo('sqlite'), Dialect::Unsupported, ['BEGIN', 'COMMIT']];
+    }
+
+    #[DataProvider('rollBackProvider')]
+    public function transactionRollsBackAndRethrows(bool $failRollBack): void
+    {
+        $pdo = new FakePdo('pgsql', current: '0', failRollBack: $failRollBack);
+        $error = new \RuntimeException('query failed');
+
+        try {
+            StatementTimeout::for($pdo, Dialect::PostgreSql)->transaction(Contexts::withBudget(1_500), static function () use ($error): never {
+                throw $error;
+            });
+        } catch (\RuntimeException $caught) {
+            Assert::same($caught, $error);
+            Assert::same($pdo->statements[\count($pdo->statements) - 1], 'ROLLBACK');
+            Assert::false($pdo->inTransaction());
+
+            return;
+        }
+
+        throw new \LogicException('the callback error was expected');
+    }
+
+    public static function rollBackProvider(): iterable
+    {
+        yield 'rolled back' => [false];
+        yield 'rollback failed too' => [true];
+    }
+
+    public function transactionRollsBackForATerminatedContext(): void
+    {
+        $pdo = new FakePdo('pgsql', current: '0');
+        [$context, $controller] = Context::background()->withCancel();
+        $controller->cancel();
+
+        try {
+            StatementTimeout::for($pdo, Dialect::PostgreSql)->transaction($context, static fn(): bool => true);
+        } catch (ContextCancelledException) {
+            Assert::same($pdo->statements, ['BEGIN', 'ROLLBACK']);
+
+            return;
+        }
+
+        throw new \LogicException('a cancellation was expected');
+    }
+
+    public function transactionRefusesAnOpenTransaction(): void
+    {
+        $pdo = new FakePdo('pgsql', current: '0', transaction: true);
+
+        try {
+            StatementTimeout::for($pdo, Dialect::PostgreSql)->transaction(Contexts::withBudget(1_500), static fn(): bool => true);
+        } catch (\LogicException $error) {
+            Assert::string($error->getMessage())->contains('already open');
+            Assert::same($pdo->statements, []);
+
+            return;
+        }
+
+        throw new \LogicException('a refusal was expected');
+    }
+
     public function withinWithoutADeadlineOnlyRunsTheCallback(): void
     {
         $pdo = new FakePdo('mysql');

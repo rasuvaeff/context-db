@@ -11,7 +11,7 @@ database server enforces itself. Namespace `Rasuvaeff\Context\Db`.
 
 ## Rules
 
-- PHP 8.3+, `ext-pdo`, `rasuvaeff/context` ^0.3; `ext-pdo_mysql` / `ext-pdo_pgsql` per server.
+- PHP 8.3+, `ext-pdo`, `rasuvaeff/context` ^0.5; `ext-pdo_mysql` / `ext-pdo_pgsql` per server.
 - `StatementTimeout::for(PDO $pdo, ?Dialect $dialect = null)` detects the dialect:
   driver `mysql` + server version containing "MariaDB" → `MariaDb`, other
   `mysql` → `MySql`, `pgsql` → `PostgreSql`, anything else → `Unsupported`.
@@ -23,12 +23,15 @@ database server enforces itself. Namespace `Rasuvaeff\Context\Db`.
 - PostgreSQL has no per-statement syntax: `apply()` throws `LogicException`; use `within()`.
 - A PostgreSQL timeout aborts the transaction (`25P02` until rollback) — the caller rolls back.
 - pgbouncer (transaction pooling): call `within()` inside a transaction → `SET LOCAL`.
-- PostgreSQL: never leave a transaction open across `within()` (entered outside
-  a transaction, callback opens one and exits with it open): the restore runs
-  inside it (or fails with `25P02` if it is aborted) and a later rollback undoes
-  it — the session keeps the entry value (the budget, unless a stricter previous
-  limit was kept).
-  Open and close it inside the callback, or call `within()` inside it.
+- PostgreSQL: `within()` entered outside a transaction throws `LogicException`
+  (with or without a deadline) when the callback RETURNS with a transaction open (a later rollback would undo
+  the restore and keep the budget on the session). If the callback THROWS with
+  it open, its error is rethrown unchanged and the restore may be lost: roll
+  back and treat the session's `statement_timeout` as unknown.
+  Safe forms: `transaction()`, `within()` inside your transaction (`SET LOCAL`),
+  or open and close the transaction inside the callback.
+- `transaction()` drives `\PDO` directly: with yiisoft/db use `within()`/`run()`
+  inside `$db->transaction(...)` instead.
 - MySQL `sql_mode=NO_BACKSLASH_ESCAPES`: the hint scanner treats `\` as an
   escape; a literal ending in `\` can make `apply()` put the hint inside a
   later literal. Use `within()` (or bind such values) in that mode.
@@ -55,6 +58,11 @@ $rows = $timeout->within($ctx, fn () => $pdo->query($sql)->fetchAll());
 // limit is kept: no SET, no restore),
 // also when the callback throws; PostgreSQL in a transaction → SET LOCAL
 // each statement inside gets the budget measured at entry
+
+$affected = $timeout->transaction($ctx, fn () => $pdo->exec($sql));
+// BEGIN, budget (PostgreSQL: SET LOCAL — ends with the transaction, nothing
+// left on the session even after a timeout), callback, COMMIT; ROLLBACK +
+// rethrow when it throws. A transaction already open → LogicException.
 
 $rows = $timeout->run($sql, $ctx, fn (string $sql) => $pdo->query($sql)->fetchAll());
 // any dialect: MySQL/MariaDB → $execute(apply($sql)), PostgreSQL → within(fn => $execute($sql))
