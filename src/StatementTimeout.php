@@ -97,7 +97,8 @@ final readonly class StatementTimeout
      * inside a transaction `SET LOCAL` is used, which is what a transaction-
      * pooling pgbouncer requires. On PostgreSQL entered outside a
      * transaction, a callback that returns with a transaction still open is
-     * refused: the restore would not survive that transaction's rollback.
+     * refused (with or without a deadline): the restore would not survive
+     * that transaction's rollback.
      *
      * @template T
      *
@@ -113,7 +114,7 @@ final readonly class StatementTimeout
     {
         $milliseconds = $context->budgetMs();
         if ($milliseconds === null) {
-            return $callback();
+            return $this->dialect === Dialect::PostgreSql ? $this->refusingLeftOpen($callback) : $callback();
         }
 
         return match ($this->dialect) {
@@ -235,8 +236,7 @@ final readonly class StatementTimeout
      * PostgreSQL has no non-transactional `SET`: entered outside a
      * transaction, the limit is a session `SET`, and a transaction the
      * callback leaves open would take the restore with it on rollback,
-     * keeping the budget on the session (#6). That is refused after the
-     * restore has run; a callback that throws keeps its own error.
+     * keeping the budget on the session (#6).
      *
      * @template T
      *
@@ -247,15 +247,34 @@ final readonly class StatementTimeout
      */
     private function postgreSql(int $milliseconds, callable $callback): mixed
     {
-        $inTransaction = $this->pdo->inTransaction();
-        $result = $this->scoped(
+        $set = $this->pdo->inTransaction() ? 'SET LOCAL statement_timeout = ' : 'SET statement_timeout = ';
+
+        return $this->refusingLeftOpen(fn(): mixed => $this->scoped(
             read: "SELECT setting FROM pg_settings WHERE name = 'statement_timeout'",
-            set: $inTransaction ? 'SET LOCAL statement_timeout = ' : 'SET statement_timeout = ',
+            set: $set,
             budget: (string) $milliseconds,
             milliseconds: $milliseconds,
             shift: 0,
             callback: $callback,
-        );
+        ));
+    }
+
+    /**
+     * Refuses a transaction `$callback` opened and left open, after it has
+     * run (and the restore with it). Also without a deadline, when nothing
+     * was set: the misuse shows up in tests that run without one. A callback
+     * that throws keeps its own error.
+     *
+     * @template T
+     *
+     * @param callable(): T $callback
+     *
+     * @return T
+     */
+    private function refusingLeftOpen(callable $callback): mixed
+    {
+        $inTransaction = $this->pdo->inTransaction();
+        $result = $callback();
 
         if (!$inTransaction && $this->pdo->inTransaction()) {
             throw new \LogicException(

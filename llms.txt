@@ -24,7 +24,7 @@ database server enforces itself. Namespace `Rasuvaeff\Context\Db`.
 - A PostgreSQL timeout aborts the transaction (`25P02` until rollback) — the caller rolls back.
 - pgbouncer (transaction pooling): call `within()` inside a transaction → `SET LOCAL`.
 - PostgreSQL: `within()` entered outside a transaction throws `LogicException`
-  when the callback RETURNS with a transaction open (a later rollback would undo
+  (with or without a deadline) when the callback RETURNS with a transaction open (a later rollback would undo
   the restore and keep the budget on the session). If the callback THROWS with
   it open, its error is rethrown unchanged and the restore may be lost: roll
   back and treat the session's `statement_timeout` as unknown.

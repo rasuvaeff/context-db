@@ -283,6 +283,29 @@ final class StatementTimeoutTest
         yield 'with a stricter limit kept' => ['1000'];
     }
 
+    public function postgresqlRefusesATransactionLeftOpenWithoutADeadlineToo(): void
+    {
+        $pdo = new FakePdo('pgsql', current: '0');
+
+        try {
+            StatementTimeout::for($pdo, Dialect::PostgreSql)
+                ->within(Context::background(), static fn(): bool => $pdo->beginTransaction());
+        } catch (\LogicException) {
+            Assert::same($pdo->statements, ['BEGIN']);
+
+            return;
+        }
+
+        throw new \LogicException('a refusal was expected');
+    }
+
+    public function withoutADeadlineOtherDialectsIgnoreATransactionLeftOpen(): void
+    {
+        $pdo = new FakePdo('mysql', current: 0);
+
+        Assert::true(StatementTimeout::for($pdo, Dialect::MySql)->within(Context::background(), static fn(): bool => $pdo->beginTransaction()));
+    }
+
     public function postgresqlAcceptsATransactionTheCallbackEnds(): void
     {
         $pdo = new FakePdo('pgsql', current: '0');

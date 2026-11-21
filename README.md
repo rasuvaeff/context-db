@@ -120,7 +120,8 @@ is kept: then nothing is set or restored, the callback runs after the single
 read.
 
 On PostgreSQL, entered outside a transaction, a callback that returns with a
-transaction still open makes `within()` throw `LogicException` (the restore
+transaction still open makes `within()` throw `LogicException` — with or
+without a deadline, so tests without one catch it too (the restore
 would not survive that transaction's rollback, see Limitations).
 
 ### `transaction(Context $context, callable $callback): mixed`
