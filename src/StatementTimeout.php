@@ -95,7 +95,9 @@ final readonly class StatementTimeout
      * value is kept, and then nothing is set or restored). Each statement inside gets the budget measured at
      * entry: keep checking the context between statements. On PostgreSQL
      * inside a transaction `SET LOCAL` is used, which is what a transaction-
-     * pooling pgbouncer requires.
+     * pooling pgbouncer requires. On PostgreSQL entered outside a
+     * transaction, a callback that returns with a transaction still open is
+     * refused: the restore would not survive that transaction's rollback.
      *
      * @template T
      *
@@ -103,6 +105,8 @@ final readonly class StatementTimeout
      *
      * @return T
      *
+     * @throws \LogicException on PostgreSQL when the callback, entered outside a
+     *         transaction, returns with one open
      * @throws \Rasuvaeff\Context\ContextException when the context is terminated
      */
     public function within(Context $context, callable $callback): mixed
@@ -129,16 +133,56 @@ final readonly class StatementTimeout
                 shift: 3,
                 callback: $callback,
             ),
-            Dialect::PostgreSql => $this->scoped(
-                read: "SELECT setting FROM pg_settings WHERE name = 'statement_timeout'",
-                set: $this->pdo->inTransaction() ? 'SET LOCAL statement_timeout = ' : 'SET statement_timeout = ',
-                budget: (string) $milliseconds,
-                milliseconds: $milliseconds,
-                shift: 0,
-                callback: $callback,
-            ),
+            Dialect::PostgreSql => $this->postgreSql($milliseconds, $callback),
             default => $callback(),
         };
+    }
+
+    /**
+     * Runs `$callback` in a transaction this method opens: committed when the
+     * callback returns, rolled back when it throws (the error is rethrown),
+     * with the remaining budget as the statement timeout. On PostgreSQL the
+     * limit is a `SET LOCAL`, which ends with the transaction whether it
+     * commits or rolls back, so nothing can be left on the session; on MySQL
+     * and MariaDB the session limit is set and restored as in
+     * {@see within()}. The callback must not commit, roll back or open a
+     * transaction itself. This drives the transaction through `\PDO`
+     * directly: with a database layer that tracks transactions itself
+     * (yiisoft/db), call {@see within()} inside that layer's transaction.
+     *
+     * @template T
+     *
+     * @param callable(): T $callback
+     *
+     * @return T
+     *
+     * @throws \LogicException when a transaction is already open — call {@see within()} inside it
+     * @throws \Rasuvaeff\Context\ContextException when the context is terminated
+     */
+    public function transaction(Context $context, callable $callback): mixed
+    {
+        if ($this->pdo->inTransaction()) {
+            throw new \LogicException('A transaction is already open; call within() inside it instead of transaction()');
+        }
+
+        $this->pdo->beginTransaction();
+
+        try {
+            $result = $this->within($context, $callback);
+        } catch (\Throwable $error) {
+            try {
+                $this->pdo->rollBack();
+            } catch (\Throwable) {
+                // The callback's error is the one to report; a connection
+                // that cannot roll back has lost the transaction anyway.
+            }
+
+            throw $error;
+        }
+
+        $this->pdo->commit();
+
+        return $result;
     }
 
     /**
@@ -185,6 +229,41 @@ final readonly class StatementTimeout
         }
 
         return $error;
+    }
+
+    /**
+     * PostgreSQL has no non-transactional `SET`: entered outside a
+     * transaction, the limit is a session `SET`, and a transaction the
+     * callback leaves open would take the restore with it on rollback,
+     * keeping the budget on the session (#6). That is refused after the
+     * restore has run; a callback that throws keeps its own error.
+     *
+     * @template T
+     *
+     * @param positive-int $milliseconds
+     * @param callable(): T $callback
+     *
+     * @return T
+     */
+    private function postgreSql(int $milliseconds, callable $callback): mixed
+    {
+        $inTransaction = $this->pdo->inTransaction();
+        $result = $this->scoped(
+            read: "SELECT setting FROM pg_settings WHERE name = 'statement_timeout'",
+            set: $inTransaction ? 'SET LOCAL statement_timeout = ' : 'SET statement_timeout = ',
+            budget: (string) $milliseconds,
+            milliseconds: $milliseconds,
+            shift: 0,
+            callback: $callback,
+        );
+
+        if (!$inTransaction && $this->pdo->inTransaction()) {
+            throw new \LogicException(
+                'The within() callback left a transaction open on PostgreSQL: a rollback would undo the restore and keep the budget on the session; end the transaction inside the callback, call within() inside the transaction, or use transaction()',
+            );
+        }
+
+        return $result;
     }
 
     /**

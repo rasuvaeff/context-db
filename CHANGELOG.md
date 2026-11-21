@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.3.0 — 2026-11-21
+
+- Added: `StatementTimeout::transaction($context, $callback)` opens a
+  transaction, runs the callback under the budget and commits (rolls back and
+  rethrows on error). On PostgreSQL the limit is a `SET LOCAL` that ends with
+  the transaction, so a rollback — even after a timeout aborted it — leaves
+  nothing on the session (#6).
+- Changed (breaking): on PostgreSQL, `within()` (and `run()`) entered outside
+  a transaction throws `LogicException` when the callback returns with a
+  transaction open, instead of silently restoring inside it — a later rollback
+  undid that restore and the session kept the budget timeout. A callback that
+  throws keeps its own error. MySQL and MariaDB are unaffected: their session
+  variables are not transactional (#6).
+
 ## 0.2.0 — 2026-11-20
 
 - Added: `StatementTimeout::run($sql, $context, $execute)` picks the

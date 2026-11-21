@@ -83,6 +83,14 @@ docker run --rm --network host -v "$PWD":/app -w /app \
   milliseconds, unlike `SHOW`'s "300ms"). Inside a PDO transaction
   `SET LOCAL` is used; a restore failing in an aborted transaction is
   swallowed only when the callback already threw.
+- **PostgreSQL has no non-transactional `SET`** (#6): `SET`,
+  `set_config(…, false)` and `RESET` are all undone by a rollback of the
+  transaction they ran in. A `within()` entered outside a transaction whose
+  callback returns with one open is therefore refused (`LogicException`) —
+  never try to "restore harder" there. `transaction()` owns the transaction
+  and relies on `SET LOCAL` ending with it. MySQL/MariaDB session variables
+  are not transactional; `ServerTimeoutIntegrationTest` pins both facts on
+  live servers.
 - Facts above were verified 2026-10-15 on MySQL 8.0.46, MariaDB 11.8.9 and
   PostgreSQL 16.15; CI runs MySQL 8.4, MariaDB 11.8, PostgreSQL 17.
 - `tests/Support/FakePdo` extends `PDO` over `sqlite::memory:` and fakes the

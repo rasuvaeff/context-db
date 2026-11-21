@@ -23,6 +23,7 @@ final class FakePdo extends \PDO
         private readonly string|int|float|null $current = 0,
         public bool $transaction = false,
         private readonly ?\Closure $onExec = null,
+        private readonly bool $failRollBack = false,
     ) {
         parent::__construct('sqlite::memory:');
     }
@@ -65,5 +66,35 @@ final class FakePdo extends \PDO
     public function inTransaction(): bool
     {
         return $this->transaction;
+    }
+
+    #[\Override]
+    public function beginTransaction(): bool
+    {
+        $this->statements[] = 'BEGIN';
+        $this->transaction = true;
+
+        return true;
+    }
+
+    #[\Override]
+    public function commit(): bool
+    {
+        $this->statements[] = 'COMMIT';
+        $this->transaction = false;
+
+        return true;
+    }
+
+    #[\Override]
+    public function rollBack(): bool
+    {
+        $this->statements[] = 'ROLLBACK';
+        $this->transaction = false;
+        if ($this->failRollBack) {
+            throw new \PDOException('server has gone away');
+        }
+
+        return true;
     }
 }

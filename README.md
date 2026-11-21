@@ -50,17 +50,21 @@ package uses what each server offers — and each offers something different:
   leaks to whoever gets the server connection next. Call `within()` inside a
   transaction — it then uses `SET LOCAL`, which ends with the transaction.
 - **A PostgreSQL timeout aborts the transaction.** Every further statement
-  fails with `25P02` until the caller rolls back; this package never touches
-  your transaction.
-- **On PostgreSQL, do not leave a transaction open across `within()`.**
+  fails with `25P02` until the caller rolls back; `within()` and `run()` never
+  touch your transaction — only `transaction()`, which owns its own, rolls it
+  back.
+- **On PostgreSQL, a transaction left open across `within()` is refused.**
   PostgreSQL has no non-transactional `SET`: when `within()` is entered
-  outside a transaction and the callback opens one and returns (or throws)
-  with it still open, the restore runs inside that transaction (or fails with
-  `25P02` if a statement error aborted it), and the later rollback undoes it —
-  the session keeps the timeout set on entry: the budget, unless the previous
-  limit was stricter and was kept.
-  Either open and close the transaction inside the callback, or call
-  `within()` inside the transaction, so it uses `SET LOCAL`.
+  outside a transaction and the callback opens one and leaves it open, the
+  restore runs inside that transaction and a later rollback would undo it —
+  the session would keep the budget. `within()` therefore throws
+  `LogicException` when its callback returns with such a transaction open.
+  When the callback **throws** with it open, its own error is rethrown
+  unchanged and the restore may still be lost: roll back and treat the
+  connection's `statement_timeout` as unknown. The safe forms: `transaction()`
+  (it owns the transaction and uses `SET LOCAL`), `within()` called inside
+  your transaction (also `SET LOCAL`), or a transaction opened and closed
+  inside the callback.
 - `within()` gives each statement the budget measured at entry, not what is
   left after the previous statement: keep calling `assertActive()` between
   statements.
@@ -115,12 +119,41 @@ failing restore never hides the callback's error). A stricter previous value
 is kept: then nothing is set or restored, the callback runs after the single
 read.
 
+On PostgreSQL, entered outside a transaction, a callback that returns with a
+transaction still open makes `within()` throw `LogicException` (the restore
+would not survive that transaction's rollback, see Limitations).
+
+### `transaction(Context $context, callable $callback): mixed`
+
+Opens a transaction through PDO, runs the callback under the budget as
+`within()` does, commits when it returns and rolls back (and rethrows) when it
+throws. On PostgreSQL the limit is a `SET LOCAL`, which ends with the
+transaction on commit and on rollback alike — also after a timeout aborted
+it — so nothing is left on the session. MySQL and MariaDB session variables
+are not transactional: there the limit is set and restored around the
+callback.
+
+```php
+$id = $timeout->transaction($context, static function () use ($pdo): int {
+    $pdo->exec("INSERT INTO report (day) VALUES (CURRENT_DATE)");
+
+    return (int) $pdo->lastInsertId();
+});
+```
+
+- A transaction already open throws `LogicException`: call `within()` inside it.
+- The callback must not commit, roll back or open a transaction itself.
+- It drives `\PDO` directly. With a layer that counts transactions itself
+  (yiisoft/db), call `within()`/`run()` inside that layer's transaction
+  instead.
+
 ### `run(string $sql, Context $context, callable $execute): mixed`
 
 Dialect-independent: `$execute` receives the SQL to send. MySQL and MariaDB
 get `apply()`'s per-statement limit, PostgreSQL runs `$execute` inside
-`within()`, an unsupported dialect gets `$sql` unchanged. Returns what
-`$execute` returns; a terminated context throws before `$execute` runs.
+`within()` (and so refuses a transaction `$execute` leaves open), an
+unsupported dialect gets `$sql` unchanged. Returns what `$execute` returns; a
+terminated context throws before `$execute` runs.
 
 ```php
 $rows = $timeout->run($sql, $context, static fn(string $sql): array => $pdo->query($sql)->fetchAll());
@@ -153,13 +186,15 @@ try {
 ```
 
 This recipe is executed by `tests/Integration/YiisoftDbIntegrationTest.php`
-on MySQL, MariaDB and PostgreSQL.
+on MySQL, MariaDB and PostgreSQL. For a transaction, call `run()`/`within()`
+inside `$db->transaction(...)` — not `transaction()`, which would open one
+behind yiisoft/db's back.
 
 ### Public API
 
 | Class | Description |
 |---|---|
-| `StatementTimeout` | `for(PDO, ?Dialect)`, `dialect()`, `apply()`, `within()`, `run()`, `translate()` |
+| `StatementTimeout` | `for(PDO, ?Dialect)`, `dialect()`, `apply()`, `within()`, `transaction()`, `run()`, `translate()` |
 | `Dialect` | `MySql`, `MariaDb`, `PostgreSql`, `Unsupported` — detected from the driver name and, for `mysql`, the server version |
 
 ## Security
