@@ -30,6 +30,10 @@ database server enforces itself. Namespace `Rasuvaeff\Context\Db`.
   back and treat the session's `statement_timeout` as unknown.
   Safe forms: `transaction()`, `within()` inside your transaction (`SET LOCAL`),
   or open and close the transaction inside the callback.
+- One connection per concurrent unit of work: `within()`/`transaction()` entered
+  from a Fiber while ANOTHER Fiber is suspended inside a scope on the same `\PDO`
+  throws `LogicException` (with or without a deadline) — overlapping scopes would
+  restore the session timeout out of order. Nesting within one Fiber is fine.
 - `transaction()` drives `\PDO` directly: with yiisoft/db use `within()`/`run()`
   inside `$db->transaction(...)` instead.
 - MySQL `sql_mode=NO_BACKSLASH_ESCAPES`: the hint scanner treats `\` as an

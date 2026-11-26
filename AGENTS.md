@@ -91,6 +91,14 @@ docker run --rm --network host -v "$PWD":/app -w /app \
   and relies on `SET LOCAL` ending with it. MySQL/MariaDB session variables
   are not transactional; `ServerTimeoutIntegrationTest` pins both facts on
   live servers.
+- **The session timeout is one value per connection** (#11): two Fibers with
+  overlapping scopes on one `\PDO` restore it out of order (a stale budget
+  outlives both, or a scope runs unlimited). `Internal\ScopeOwner` refuses
+  the second Fiber; same-Fiber nesting (`transaction()` and PostgreSQL
+  `run()` call `within()`) is counted, not refused. The owner Fiber is held
+  weakly and never in `run()`'s own frame — that frame lives on the Fiber's
+  stack, and a strong reference there keeps an abandoned Fiber (and the lock)
+  alive forever.
 - Facts above were verified 2026-10-15 on MySQL 8.0.46, MariaDB 11.8.9 and
   PostgreSQL 16.15; CI runs MySQL 8.4, MariaDB 11.8, PostgreSQL 17.
 - `tests/Support/FakePdo` extends `PDO` over `sqlite::memory:` and fakes the

@@ -65,6 +65,14 @@ package uses what each server offers — and each offers something different:
   (it owns the transaction and uses `SET LOCAL`), `within()` called inside
   your transaction (also `SET LOCAL`), or a transaction opened and closed
   inside the callback.
+- **One connection serves one Fiber at a time.** The session timeout is one
+  value per connection: a `within()` or `transaction()` entered from a second
+  Fiber while another Fiber is suspended inside its own scope on the same
+  `\PDO` would save that scope's temporary budget as "previous" and restore
+  it out of order — leaving a timeout on the session or running unlimited.
+  It throws `LogicException` instead, with or without a deadline. Scopes
+  nested in one Fiber are fine; give each concurrent unit of work its own
+  connection.
 - `within()` gives each statement the budget measured at entry, not what is
   left after the previous statement: keep calling `assertActive()` between
   statements.
@@ -123,6 +131,10 @@ On PostgreSQL, entered outside a transaction, a callback that returns with a
 transaction still open makes `within()` throw `LogicException` — with or
 without a deadline, so tests without one catch it too (the restore
 would not survive that transaction's rollback, see Limitations).
+
+Entering while another Fiber has a `within()`/`transaction()` scope open on
+the same connection throws `LogicException` (see Limitations); nesting in one
+Fiber is allowed.
 
 ### `transaction(Context $context, callable $callback): mixed`
 

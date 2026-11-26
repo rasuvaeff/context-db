@@ -10,6 +10,7 @@ use Rasuvaeff\Context\Db\Internal\Decimal;
 use Rasuvaeff\Context\Db\Internal\DialectDetector;
 use Rasuvaeff\Context\Db\Internal\MariaDbStatement;
 use Rasuvaeff\Context\Db\Internal\MySqlHint;
+use Rasuvaeff\Context\Db\Internal\ScopeOwner;
 
 /**
  * Turns the remaining {@see Context} budget into a timeout the database
@@ -98,7 +99,11 @@ final readonly class StatementTimeout
      * pooling pgbouncer requires. On PostgreSQL entered outside a
      * transaction, a callback that returns with a transaction still open is
      * refused (with or without a deadline): the restore would not survive
-     * that transaction's rollback.
+     * that transaction's rollback. A connection serves one Fiber at a time:
+     * scopes nest within one Fiber, but entering while another Fiber is
+     * suspended inside its own scope on the same `\PDO` is refused — the
+     * session timeout is one value, and overlapping scopes would restore it
+     * out of order.
      *
      * @template T
      *
@@ -107,36 +112,13 @@ final readonly class StatementTimeout
      * @return T
      *
      * @throws \LogicException on PostgreSQL when the callback, entered outside a
-     *         transaction, returns with one open
+     *         transaction, returns with one open; when another Fiber has a
+     *         scope open on this connection
      * @throws \Rasuvaeff\Context\ContextException when the context is terminated
      */
     public function within(Context $context, callable $callback): mixed
     {
-        $milliseconds = $context->budgetMs();
-        if ($milliseconds === null) {
-            return $this->dialect === Dialect::PostgreSql ? $this->refusingLeftOpen($callback) : $callback();
-        }
-
-        return match ($this->dialect) {
-            Dialect::MySql => $this->scoped(
-                read: 'SELECT @@SESSION.max_execution_time',
-                set: 'SET SESSION max_execution_time = ',
-                budget: (string) $milliseconds,
-                milliseconds: $milliseconds,
-                shift: 0,
-                callback: $callback,
-            ),
-            Dialect::MariaDb => $this->scoped(
-                read: 'SELECT @@SESSION.max_statement_time',
-                set: 'SET SESSION max_statement_time = ',
-                budget: MariaDbStatement::seconds($milliseconds),
-                milliseconds: $milliseconds,
-                shift: 3,
-                callback: $callback,
-            ),
-            Dialect::PostgreSql => $this->postgreSql($milliseconds, $callback),
-            default => $callback(),
-        };
+        return ScopeOwner::run($this->pdo, fn(): mixed => $this->limited($context, $callback));
     }
 
     /**
@@ -157,10 +139,23 @@ final readonly class StatementTimeout
      *
      * @return T
      *
-     * @throws \LogicException when a transaction is already open — call {@see within()} inside it
+     * @throws \LogicException when a transaction is already open — call {@see within()} inside it;
+     *         when another Fiber has a scope open on this connection
      * @throws \Rasuvaeff\Context\ContextException when the context is terminated
      */
     public function transaction(Context $context, callable $callback): mixed
+    {
+        return ScopeOwner::run($this->pdo, fn(): mixed => $this->transactional($context, $callback));
+    }
+
+    /**
+     * @template T
+     *
+     * @param callable(): T $callback
+     *
+     * @return T
+     */
+    private function transactional(Context $context, callable $callback): mixed
     {
         if ($this->pdo->inTransaction()) {
             throw new \LogicException('A transaction is already open; call within() inside it instead of transaction()');
@@ -230,6 +225,42 @@ final readonly class StatementTimeout
         }
 
         return $error;
+    }
+
+    /**
+     * @template T
+     *
+     * @param callable(): T $callback
+     *
+     * @return T
+     */
+    private function limited(Context $context, callable $callback): mixed
+    {
+        $milliseconds = $context->budgetMs();
+        if ($milliseconds === null) {
+            return $this->dialect === Dialect::PostgreSql ? $this->refusingLeftOpen($callback) : $callback();
+        }
+
+        return match ($this->dialect) {
+            Dialect::MySql => $this->scoped(
+                read: 'SELECT @@SESSION.max_execution_time',
+                set: 'SET SESSION max_execution_time = ',
+                budget: (string) $milliseconds,
+                milliseconds: $milliseconds,
+                shift: 0,
+                callback: $callback,
+            ),
+            Dialect::MariaDb => $this->scoped(
+                read: 'SELECT @@SESSION.max_statement_time',
+                set: 'SET SESSION max_statement_time = ',
+                budget: MariaDbStatement::seconds($milliseconds),
+                milliseconds: $milliseconds,
+                shift: 3,
+                callback: $callback,
+            ),
+            Dialect::PostgreSql => $this->postgreSql($milliseconds, $callback),
+            default => $callback(),
+        };
     }
 
     /**
