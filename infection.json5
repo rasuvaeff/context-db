@@ -8,6 +8,10 @@
         "summary": "build/infection-summary.log"
     },
     "testFramework": "testo",
+    // Unit only: every package declares a Benchmarks suite (testo.php), and Infection's initial
+    // test run would execute it. A timing-sensitive benchmark fails under host load and aborts
+    // the whole mutation run (result, 2026-11-03). Benchmarks mutate nothing and kill nothing.
+    "testFrameworkOptions": "--suite=Unit",
     // Survivors are the scanner's give-up paths in Internal/MySqlHint (a `return false`
     // whose caller reaches null a step later because the offset never moved or ran to
     // the end), `<` to `<=` loop bounds that only read one char past the end, and

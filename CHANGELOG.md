@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.4.0 — 2026-11-26
+
+- Changed (breaking): `within()` and `transaction()` throw `LogicException`
+  when another Fiber has a scope open on the same connection, with or without
+  a deadline. Overlapping scopes saved each other's temporary budget as
+  "previous" and restored out of order: a stale timeout outlived both scopes,
+  or a scope ran unlimited. Scopes nested in one Fiber are unaffected; give
+  each concurrent unit of work its own connection (#11).
+
 ## 0.3.0 — 2026-11-21
 
 - Added: `StatementTimeout::transaction($context, $callback)` opens a
