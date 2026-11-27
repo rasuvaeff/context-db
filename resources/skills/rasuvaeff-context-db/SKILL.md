@@ -65,8 +65,9 @@ try {
 }
 ```
 
-yiisoft/db wraps driver errors: unwrap `$dbException->getPrevious()` (a
-`PDOException`) before `translate()`.
+yiisoft/db wraps driver errors in its own `Exception`: catch that and pass it to
+`translate()` as is — the `PDOException` is looked up in the `previous` chain,
+and an error that is not this budget's timeout comes back unchanged.
 
 ## Full API
 
