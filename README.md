@@ -58,10 +58,11 @@ package uses what each server offers — and each offers something different:
   outside a transaction and the callback opens one and leaves it open, the
   restore runs inside that transaction and a later rollback would undo it —
   the session would keep the budget. `within()` therefore throws
-  `LogicException` when its callback returns with such a transaction open.
-  When the callback **throws** with it open, its own error is rethrown
-  unchanged and the restore may still be lost: roll back and treat the
-  connection's `statement_timeout` as unknown. The safe forms: `transaction()`
+  `LogicException` when its callback returns with such a transaction open,
+  and also when it **throws** with it open: then the callback's error is the
+  `LogicException`'s `previous`, the transaction is left to you (never rolled
+  back by `within()`), and after your rollback the session keeps the budget —
+  reset `statement_timeout` or discard the connection. The safe forms: `transaction()`
   (it owns the transaction and uses `SET LOCAL`), `within()` called inside
   your transaction (also `SET LOCAL`), or a transaction opened and closed
   inside the callback.
@@ -115,7 +116,8 @@ try {
   versioned comment `/*!…*/`, SQL the scanner does not recognise) is returned
   unchanged.
 - MariaDB: an existing `SET STATEMENT` list gains `max_statement_time`, or its
-  existing value keeps the stricter of the two.
+  existing value keeps the stricter of the two, compared and written exactly
+  (`.0004` stays `0.0004`, never rounded up to `0.001`).
 - Applying twice equals applying once with the smaller budget.
 - Without a deadline `$sql` is returned as is; a terminated context throws.
 
@@ -123,14 +125,21 @@ try {
 
 Sets the remaining budget as the session's statement timeout, runs the
 callback, and restores the previous value — also when the callback throws (a
-failing restore never hides the callback's error). A stricter previous value
-is kept: then nothing is set or restored, the callback runs after the single
-read.
+failing restore never hides the callback's error). A previous limit no looser
+than the budget (compared exactly, so MariaDB's `0.0004` s stays stricter than
+a 1 ms budget) is kept: then nothing is set or restored, the callback runs
+after the single read.
 
-On PostgreSQL, entered outside a transaction, a callback that returns with a
-transaction still open makes `within()` throw `LogicException` — with or
-without a deadline, so tests without one catch it too (the restore
-would not survive that transaction's rollback, see Limitations).
+The restore is guaranteed except in one case it refuses instead: on
+PostgreSQL, entered outside a transaction, a callback that returns **or
+throws** with a transaction it opened still open makes `within()` throw
+`LogicException` — with or without a deadline, so tests without one catch it
+too. The restore would not survive that transaction's rollback (see
+Limitations). A thrown callback error becomes the `LogicException`'s
+`previous` (`translate()` still finds a server timeout in it); the transaction
+is not rolled back, and after you roll it back the session's
+`statement_timeout` is not the one you had: reset it or discard the
+connection.
 
 Entering while another Fiber has a `within()`/`transaction()` scope open on
 the same connection throws `LogicException` (see Limitations); nesting in one

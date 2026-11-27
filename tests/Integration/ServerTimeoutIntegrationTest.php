@@ -7,6 +7,7 @@ namespace Rasuvaeff\Context\Db\Tests\Integration;
 use Rasuvaeff\Context\Context;
 use Rasuvaeff\Context\ContextExpiredException;
 use Rasuvaeff\Context\Db\StatementTimeout;
+use Rasuvaeff\Context\Testing\FakeTimeSource;
 use Testo\Assert;
 use Testo\Codecov\CoversNothing;
 use Testo\Data\DataProvider;
@@ -170,6 +171,73 @@ final class ServerTimeoutIntegrationTest
         }
 
         throw new \LogicException('within() was expected to refuse a transaction left open');
+    }
+
+    /**
+     * #6: a callback that throws with a transaction it opened still open is
+     * refused, its error kept as `previous`. The leak it reports is real:
+     * after the caller's rollback the session still carries the budget — the
+     * caller has to reset the setting or discard the connection.
+     */
+    public function postgresqlRefusesACallbackThatThrowsWithATransactionLeftOpen(): void
+    {
+        if ($this->server() !== 'pgsql') {
+            Assert::true(actual: true);
+
+            return;
+        }
+
+        $pdo = $this->connect('pgsql');
+        [$context] = Context::background()->withTimeout(5.0);
+        $error = new \RuntimeException('callback failed');
+
+        try {
+            StatementTimeout::for($pdo)->within($context, static function () use ($pdo, $error): never {
+                $pdo->beginTransaction();
+
+                throw $error;
+            });
+        } catch (\LogicException $refusal) {
+            Assert::same($refusal->getPrevious(), $error);
+            Assert::true($pdo->inTransaction());
+
+            $pdo->rollBack();
+            $show = $pdo->query('SHOW statement_timeout');
+            Assert::string($show === false ? '' : (string) $show->fetchColumn())->matchesRegex('/\A\d+ms\z/');
+            Assert::true($this->isBudgetLimit($this->sessionLimit($pdo, 'pgsql')));
+            $pdo->exec('SET statement_timeout = 10000');
+
+            return;
+        } finally {
+            if ($pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
+        }
+
+        throw new \LogicException('within() was expected to refuse a transaction left open by a throwing callback');
+    }
+
+    /**
+     * #5: a MariaDB limit a fraction of a millisecond under the budget is
+     * stricter and stays in force inside the scope; rounded up to whole
+     * milliseconds it looked equal and was loosened to the budget.
+     */
+    public function mariaDbKeepsAFractionalLimitStricterThanTheBudget(): void
+    {
+        if ($this->server() !== 'mariadb') {
+            Assert::true(actual: true);
+
+            return;
+        }
+
+        $pdo = $this->connect('mariadb');
+        $pdo->exec('SET SESSION max_statement_time = 1.4995');
+        [$context] = Context::background(new FakeTimeSource())->withTimeout(1.5);
+
+        $inside = StatementTimeout::for($pdo)->within($context, fn(): string => $this->sessionLimit($pdo, 'mariadb'));
+
+        Assert::same($inside, '1.4995');
+        Assert::same($this->sessionLimit($pdo, 'mariadb'), '1.4995');
     }
 
     /**

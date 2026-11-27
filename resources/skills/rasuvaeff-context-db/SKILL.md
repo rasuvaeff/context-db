@@ -34,8 +34,11 @@ Namespace `Rasuvaeff\Context\Db\`.
    transaction-pooling pgbouncer call `within()` inside a transaction so it
    uses `SET LOCAL`. `within()` entered outside a transaction throws
    `LogicException` when the callback returns with a transaction open (a
-   rollback would undo the restore and keep the budget); a callback that
-   throws with one open keeps its error and may still lose the restore.
+   rollback would undo the restore and keep the budget), and also when it
+   throws with one open — the callback's error is then the `previous`; the
+   transaction is not rolled back for you, and after your rollback the
+   session keeps the budget: reset `statement_timeout` or discard the
+   connection.
    Safe forms: `$timeout->transaction($ctx, fn)` (owns the transaction,
    `SET LOCAL`), `within()` inside your transaction, or open and close the
    transaction inside the callback. With yiisoft/db use `within()`/`run()`

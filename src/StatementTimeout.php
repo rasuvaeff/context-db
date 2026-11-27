@@ -92,14 +92,18 @@ final readonly class StatementTimeout
 
     /**
      * Runs `$callback` with the remaining budget as the session's statement
-     * timeout and restores the previous value afterwards (a stricter previous
-     * value is kept, and then nothing is set or restored). Each statement inside gets the budget measured at
+     * timeout and restores the previous value afterwards (a previous limit
+     * that is not looser than the budget is kept, and then nothing is set or
+     * restored). Each statement inside gets the budget measured at
      * entry: keep checking the context between statements. On PostgreSQL
      * inside a transaction `SET LOCAL` is used, which is what a transaction-
      * pooling pgbouncer requires. On PostgreSQL entered outside a
-     * transaction, a callback that returns with a transaction still open is
-     * refused (with or without a deadline): the restore would not survive
-     * that transaction's rollback. A connection serves one Fiber at a time:
+     * transaction, a callback that returns or throws with a transaction it
+     * opened still open is refused (with or without a deadline): the restore
+     * would not survive that transaction's rollback. A callback that throws
+     * gets its error wrapped as `previous`; the transaction is left to the
+     * caller, whose rollback leaves the budget on the session — reset the
+     * setting or discard the connection. A connection serves one Fiber at a time:
      * scopes nest within one Fiber, but entering while another Fiber is
      * suspended inside its own scope on the same `\PDO` is refused — the
      * session timeout is one value, and overlapping scopes would restore it
@@ -112,8 +116,9 @@ final readonly class StatementTimeout
      * @return T
      *
      * @throws \LogicException on PostgreSQL when the callback, entered outside a
-     *         transaction, returns with one open; when another Fiber has a
-     *         scope open on this connection
+     *         transaction, returns or throws with one open (a thrown error is
+     *         the `previous`); when another Fiber has a scope open on this
+     *         connection
      * @throws \Rasuvaeff\Context\ContextException when the context is terminated
      */
     public function within(Context $context, callable $callback): mixed
@@ -246,16 +251,12 @@ final readonly class StatementTimeout
                 read: 'SELECT @@SESSION.max_execution_time',
                 set: 'SET SESSION max_execution_time = ',
                 budget: (string) $milliseconds,
-                milliseconds: $milliseconds,
-                shift: 0,
                 callback: $callback,
             ),
             Dialect::MariaDb => $this->scoped(
                 read: 'SELECT @@SESSION.max_statement_time',
                 set: 'SET SESSION max_statement_time = ',
                 budget: MariaDbStatement::seconds($milliseconds),
-                milliseconds: $milliseconds,
-                shift: 3,
                 callback: $callback,
             ),
             Dialect::PostgreSql => $this->postgreSql($milliseconds, $callback),
@@ -284,8 +285,6 @@ final readonly class StatementTimeout
             read: "SELECT setting FROM pg_settings WHERE name = 'statement_timeout'",
             set: $set,
             budget: (string) $milliseconds,
-            milliseconds: $milliseconds,
-            shift: 0,
             callback: $callback,
         ));
     }
@@ -294,7 +293,10 @@ final readonly class StatementTimeout
      * Refuses a transaction `$callback` opened and left open, after it has
      * run (and the restore with it). Also without a deadline, when nothing
      * was set: the misuse shows up in tests that run without one. A callback
-     * that throws keeps its own error.
+     * that throws with such a transaction open is refused too, its error
+     * kept as `previous`: the restore ran inside that transaction (or failed
+     * in it), so the caller's rollback leaves the budget on the session. The
+     * transaction is not ours and is never rolled back here.
      *
      * @template T
      *
@@ -305,7 +307,21 @@ final readonly class StatementTimeout
     private function refusingLeftOpen(callable $callback): mixed
     {
         $inTransaction = $this->pdo->inTransaction();
-        $result = $callback();
+
+        try {
+            $result = $callback();
+        } catch (\Throwable $error) {
+            if (!$inTransaction && $this->pdo->inTransaction()) {
+                throw new \LogicException(
+                    'The within() callback threw with a transaction it opened still open on PostgreSQL: the session statement_timeout cannot be restored past that transaction\'s rollback; reset the setting or discard the connection, and end the transaction inside the callback, call within() inside the transaction, or use transaction()',
+                    // not the callback's code: a PDOException's is an SQLSTATE string
+                    code: 0,
+                    previous: $error,
+                );
+            }
+
+            throw $error;
+        }
 
         if (!$inTransaction && $this->pdo->inTransaction()) {
             throw new \LogicException(
@@ -321,13 +337,13 @@ final readonly class StatementTimeout
      *
      * The previous value is restored exactly as read (normalised, never
      * rounded): rounding a MariaDB limit of 0.0004 s to whole milliseconds
-     * would restore 0 — no limit at all. It counts as stricter than the
-     * budget when its value, rounded UP to milliseconds, is smaller.
+     * would restore 0 — no limit at all. It is kept when it is a limit and
+     * no looser than the budget, compared exactly in the setting's own unit:
+     * rounded up to whole milliseconds, 0.0004 s looked equal to a 1 ms
+     * budget and was replaced by the looser 0.001 for the scope.
      *
      * @param string $set the statement prefix the value is appended to
-     * @param string $budget the budget in the setting's own unit
-     * @param positive-int $milliseconds
-     * @param int<0, max> $shift decimal places from the setting's unit to milliseconds
+     * @param string $budget the budget in the setting's own unit, as {@see Decimal::normalize()} writes it
      * @param callable(): T $callback
      *
      * @return T
@@ -336,15 +352,13 @@ final readonly class StatementTimeout
         string $read,
         string $set,
         string $budget,
-        int $milliseconds,
-        int $shift,
         callable $callback,
     ): mixed {
         $previous = $this->readSetting($read);
-        $previousMs = Decimal::ceilShifted($previous, $shift) ?? 0;
-        if ($previousMs > 0 && $previousMs < $milliseconds) {
-            // A stricter limit already holds: setting it again and restoring
-            // it would be two round trips that change nothing.
+        if ($previous !== '0' && Decimal::compare($previous, $budget) <= 0) {
+            // A limit at least as strict already holds: setting the budget
+            // would loosen it for the scope, and setting it again and
+            // restoring it would be two round trips that change nothing.
             return $callback();
         }
 
