@@ -25,9 +25,10 @@ database server enforces itself. Namespace `Rasuvaeff\Context\Db`.
 - pgbouncer (transaction pooling): call `within()` inside a transaction → `SET LOCAL`.
 - PostgreSQL: `within()` entered outside a transaction throws `LogicException`
   (with or without a deadline) when the callback RETURNS with a transaction open (a later rollback would undo
-  the restore and keep the budget on the session). If the callback THROWS with
-  it open, its error is rethrown unchanged and the restore may be lost: roll
-  back and treat the session's `statement_timeout` as unknown.
+  the restore and keep the budget on the session) — and also when it THROWS with
+  it open: the callback's error is the `LogicException`'s `previous`, the
+  transaction is NOT rolled back by `within()`, and after your rollback the
+  session keeps the budget: reset `statement_timeout` or discard the connection.
   Safe forms: `transaction()`, `within()` inside your transaction (`SET LOCAL`),
   or open and close the transaction inside the callback.
 - One connection per concurrent unit of work: `within()`/`transaction()` entered
@@ -54,12 +55,14 @@ $sql = $timeout->apply('SELECT 1', $ctx);
 // MySQL:   SELECT /*+ MAX_EXECUTION_TIME(1500) */ 1      (non-SELECT: unchanged)
 // MariaDB: SET STATEMENT max_statement_time=1.5 FOR SELECT 1  (any statement)
 // Unsupported: unchanged; no deadline: unchanged
-// existing MAX_EXECUTION_TIME / max_statement_time keeps the stricter value;
+// existing MAX_EXECUTION_TIME / max_statement_time keeps the stricter value
+// (MariaDB: exact decimal, .0004 stays 0.0004);
 // apply(apply($sql, a), b) === apply($sql, min(a, b))
 
 $rows = $timeout->within($ctx, fn () => $pdo->query($sql)->fetchAll());
-// session limit = remaining budget, restored afterwards (a stricter previous
-// limit is kept: no SET, no restore),
+// session limit = remaining budget, restored afterwards (a previous limit no
+// looser than the budget, compared exactly — MariaDB 0.0004 s < 1 ms — is kept:
+// no SET, no restore),
 // also when the callback throws; PostgreSQL in a transaction → SET LOCAL
 // each statement inside gets the budget measured at entry
 

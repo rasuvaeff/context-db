@@ -5,9 +5,10 @@ declare(strict_types=1);
 namespace Rasuvaeff\Context\Db\Internal;
 
 /**
- * Exact arithmetic on the decimal strings servers report ("32.002000"):
+ * Exact handling of the decimal strings servers report ("32.002000"):
  * through a float, 32.002 × 1000 is 32002.000000000004, and rounding that up
- * turns a 32002 ms limit into 32003.
+ * turns a 32002 ms limit into 32003; rounding 0.0004 s up to whole
+ * milliseconds makes it look no stricter than a 1 ms budget.
  *
  * @internal
  */
@@ -16,28 +17,19 @@ final class Decimal
     private const string PATTERN = '/^\s*([0-9]*)(?:\.([0-9]*))?\s*\z/';
 
     /**
-     * The value with its decimal point moved `$shift` places right, rounded
-     * up; null when `$value` is not a plain non-negative decimal.
-     *
-     * @param int<0, max> $shift
-     *
-     * @return int<0, max>|null
+     * -1, 0 or 1 as `$a` is smaller than, equal to or greater than `$b`,
+     * compared exactly; both are plain decimals as {@see normalize()}
+     * returns them ("0.0004", "1.5", "1500").
      */
-    public static function ceilShifted(string $value, int $shift): ?int
+    public static function compare(string $a, string $b): int
     {
-        if (preg_match(self::PATTERN, $value, $match) !== 1 || ($match[1] === '' && ($match[2] ?? '') === '')) {
-            return null;
-        }
+        [$aWhole, $aFraction] = self::split($a);
+        [$bWhole, $bFraction] = self::split($b);
 
-        $fraction = str_pad($match[2] ?? '', $shift, '0');
-        $whole = ltrim($match[1] . substr($fraction, 0, $shift), '0');
-        $rest = trim(substr($fraction, $shift), '0');
+        $width = max(\strlen($aFraction), \strlen($bFraction));
 
-        if (\strlen($whole) > 18) {
-            return \PHP_INT_MAX;
-        }
-
-        return max(0, (int) $whole) + ($rest === '' ? 0 : 1);
+        return [\strlen($aWhole), $aWhole, str_pad($aFraction, $width, '0')]
+            <=> [\strlen($bWhole), $bWhole, str_pad($bFraction, $width, '0')];
     }
 
     /** "30.250000" → "30.25", "007" → "7", ".5" → "0.5"; null when not a decimal. */
@@ -51,5 +43,13 @@ final class Decimal
         $fraction = rtrim($match[2] ?? '', '0');
 
         return ($whole === '' ? '0' : $whole) . ($fraction === '' ? '' : '.' . $fraction);
+    }
+
+    /** @return array{string, string} */
+    private static function split(string $value): array
+    {
+        $parts = explode('.', $value, 2);
+
+        return [ltrim($parts[0], '0'), rtrim($parts[1] ?? '', '0')];
     }
 }

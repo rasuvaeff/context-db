@@ -50,7 +50,15 @@ final class MariaDbStatementTest
         ];
         yield 'sub-millisecond existing limit stays a limit' => [
             'SET STATEMENT max_statement_time=.0004 FOR SELECT 1',
-            'SET STATEMENT max_statement_time=0.001 FOR SELECT 1',
+            'SET STATEMENT max_statement_time=0.0004 FOR SELECT 1',
+        ];
+        yield 'a limit a fraction of a millisecond under the budget is kept exactly' => [
+            'SET STATEMENT max_statement_time=1.2495 FOR SELECT 1',
+            'SET STATEMENT max_statement_time=1.2495 FOR SELECT 1',
+        ];
+        yield 'a limit a fraction of a millisecond over the budget is replaced' => [
+            'SET STATEMENT max_statement_time=1.2501 FOR SELECT 1',
+            'SET STATEMENT max_statement_time=1.25 FOR SELECT 1',
         ];
         yield 'one second is stricter than 1.25' => [
             'SET STATEMENT max_statement_time=1 FOR SELECT 1',

@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.5.0 — 2026-11-27
+
+- Fixed: a previous limit stricter than or equal to the budget is kept,
+  compared exactly in the setting's own unit. It was rounded up to whole
+  milliseconds and kept only when strictly smaller, so on MariaDB
+  `max_statement_time = 0.0004` with a 1 ms budget `within()` loosened it to
+  `0.001` for the scope, and `apply()` rewrote an existing `.0004` (or `1.2495`
+  under 1250 ms) into the looser rounded value (#14).
+- Changed (breaking): on PostgreSQL a `within()` entered outside a transaction
+  whose callback **throws** with a transaction it opened still open now throws
+  `LogicException` with the callback's error as `previous`, like the callback
+  that returns with one open. Before, the error was rethrown unchanged and the
+  caller's rollback silently left the budget on the session. The transaction
+  is still not rolled back by `within()`; reset `statement_timeout` or discard
+  the connection (#15).
+
 ## 0.4.1 — 2026-11-27
 
 - Docs: the agent skill no longer tells you to unwrap yiisoft/db exceptions before `translate()`: it looks the `PDOException` up in the `previous` chain, and unwrapping lost the original exception on non-timeout errors.

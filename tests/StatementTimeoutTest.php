@@ -99,18 +99,15 @@ final class StatementTimeoutTest
         ]);
     }
 
-    public function aPreviousLimitEqualToTheBudgetIsReplacedNotKept(): void
+    /** #5: 0.0004 s is stricter than the 1 ms a sub-millisecond budget becomes, never loosened to 0.001. */
+    public function aSubMillisecondPreviousLimitIsKeptUnderASubMillisecondBudget(): void
     {
         [$context] = Context::background(new FakeTimeSource())->withTimeout(0.000_4);
         $pdo = new FakePdo('mysql', current: '0.0004');
 
         StatementTimeout::for($pdo, Dialect::MariaDb)->within($context, static fn(): bool => true);
 
-        Assert::same($pdo->statements, [
-            'SELECT @@SESSION.max_statement_time',
-            'SET SESSION max_statement_time = 0.001',
-            'SET SESSION max_statement_time = 0.0004',
-        ]);
+        Assert::same($pdo->statements, ['SELECT @@SESSION.max_statement_time']);
     }
 
     public function postgresqlHasNoPerStatementSyntax(): void
@@ -208,10 +205,18 @@ final class StatementTimeoutTest
         yield 'mariadb keeps one second' => [new FakePdo('mysql', current: '1.000000'), Dialect::MariaDb, [
             'SELECT @@SESSION.max_statement_time',
         ]];
-        yield 'mariadb replaces a limit just below the budget rounded up' => [new FakePdo('mysql', current: '1.499100'), Dialect::MariaDb, [
+        yield 'mariadb keeps a limit just below the budget' => [new FakePdo('mysql', current: '1.499100'), Dialect::MariaDb, [
+            'SELECT @@SESSION.max_statement_time',
+        ]];
+        yield 'mariadb replaces a limit just above the budget' => [new FakePdo('mysql', current: '1.500100'), Dialect::MariaDb, [
             'SELECT @@SESSION.max_statement_time',
             'SET SESSION max_statement_time = 1.5',
-            'SET SESSION max_statement_time = 1.4991',
+            'SET SESSION max_statement_time = 1.5001',
+        ]];
+        yield 'mysql replaces a limit one millisecond above the budget' => [new FakePdo('mysql', current: 1_501), Dialect::MySql, [
+            'SELECT @@SESSION.max_execution_time',
+            'SET SESSION max_execution_time = 1500',
+            'SET SESSION max_execution_time = 1501',
         ]];
         yield 'mariadb replaces ten seconds' => [new FakePdo('mysql', current: '10.000000'), Dialect::MariaDb, [
             'SELECT @@SESSION.max_statement_time',
@@ -257,6 +262,38 @@ final class StatementTimeoutTest
             'SET LOCAL statement_timeout = 60000',
         ]];
         yield 'unsupported' => [new FakePdo('sqlite'), Dialect::Unsupported, []];
+    }
+
+    /**
+     * #5: a previous limit no looser than the budget is kept untouched —
+     * compared exactly, not after rounding it up to whole milliseconds, which
+     * made 0.0004 s equal to a 1 ms budget and loosened it to 0.001 for the
+     * scope.
+     *
+     * @param positive-int $budget
+     */
+    #[DataProvider('noLooserProvider')]
+    public function withinKeepsAPreviousLimitNoLooserThanTheBudget(FakePdo $pdo, Dialect $dialect, int $budget, string $read): void
+    {
+        $result = StatementTimeout::for($pdo, $dialect)->within(Contexts::withBudget($budget), static fn(): string => 'done');
+
+        Assert::same($result, 'done');
+        Assert::same($pdo->statements, [$read]);
+    }
+
+    public static function noLooserProvider(): iterable
+    {
+        $mysql = 'SELECT @@SESSION.max_execution_time';
+        $mariadb = 'SELECT @@SESSION.max_statement_time';
+        $postgresql = "SELECT setting FROM pg_settings WHERE name = 'statement_timeout'";
+
+        yield 'mariadb sub-millisecond under a 1 ms budget' => [new FakePdo('mysql', current: '0.000400'), Dialect::MariaDb, 1, $mariadb];
+        yield 'mariadb native float sub-millisecond under a 1 ms budget' => [new FakePdo('mysql', current: 0.0004), Dialect::MariaDb, 1, $mariadb];
+        yield 'mariadb equal to a 1 ms budget' => [new FakePdo('mysql', current: '0.001000'), Dialect::MariaDb, 1, $mariadb];
+        yield 'mariadb a fraction of a millisecond under the budget' => [new FakePdo('mysql', current: '1.499500'), Dialect::MariaDb, 1_500, $mariadb];
+        yield 'mariadb equal to the budget' => [new FakePdo('mysql', current: '1.500000'), Dialect::MariaDb, 1_500, $mariadb];
+        yield 'mysql equal to the budget' => [new FakePdo('mysql', current: 1_500), Dialect::MySql, 1_500, $mysql];
+        yield 'postgresql equal to the budget' => [new FakePdo('pgsql', current: '1500'), Dialect::PostgreSql, 1_500, $postgresql];
     }
 
     #[DataProvider('leftOpenProvider')]
@@ -333,24 +370,89 @@ final class StatementTimeoutTest
         Assert::same($result, 7);
     }
 
-    public function aCallbackErrorIsKeptWhenItLeavesATransactionOpen(): void
+    /**
+     * #6: a callback that throws with a transaction it opened still open is
+     * refused like one that returns: the restore ran inside that transaction,
+     * and the caller's rollback would leave the budget on the session. The
+     * callback's error stays reachable as `previous` (translate() still finds
+     * a server timeout in it), and the foreign transaction is not rolled back.
+     */
+    #[DataProvider('throwsLeftOpenProvider')]
+    public function postgresqlRefusesACallbackThatThrowsWithATransactionLeftOpen(string $current, bool $deadline): void
     {
-        $pdo = new FakePdo('pgsql', current: '0');
+        $pdo = new FakePdo('pgsql', current: $current);
         $error = new \PDOException('canceling statement due to statement timeout');
+        $error->errorInfo = ['57014', 7, 'ERROR:  canceling statement due to statement timeout'];
+        $clock = new FakeTimeSource();
+        $context = $deadline ? Context::background($clock)->withTimeout(1.5)[0] : Context::background($clock);
+        $timeout = StatementTimeout::for($pdo, Dialect::PostgreSql);
 
         try {
-            StatementTimeout::for($pdo, Dialect::PostgreSql)->within(Contexts::withBudget(1_500), static function () use ($pdo, $error): never {
+            $timeout->within($context, static function () use ($pdo, $error): never {
                 $pdo->beginTransaction();
 
                 throw $error;
             });
-        } catch (\PDOException $caught) {
+        } catch (\LogicException $refusal) {
+            Assert::same($refusal->getPrevious(), $error);
+            Assert::string($refusal->getMessage())->contains('discard the connection');
+            Assert::true($pdo->inTransaction());
+            Assert::false(\in_array('ROLLBACK', $pdo->statements, strict: true));
+
+            $clock->advanceMs(1_500);
+            Assert::same($timeout->translate($refusal, $context)::class, $deadline ? ContextExpiredException::class : \LogicException::class);
+
+            return;
+        }
+
+        throw new \LogicException('a refusal was expected');
+    }
+
+    public static function throwsLeftOpenProvider(): iterable
+    {
+        yield 'after the restore' => ['0', true];
+        yield 'with a stricter limit kept' => ['1000', true];
+        yield 'without a deadline' => ['0', false];
+    }
+
+    /**
+     * @param \Closure(FakePdo): void $body
+     */
+    #[DataProvider('throwsKeptProvider')]
+    public function aCallbackErrorIsKeptWhenNoTransactionIsLeftOpenByIt(FakePdo $pdo, Dialect $dialect, \Closure $body): void
+    {
+        $error = new \RuntimeException('callback failed');
+
+        try {
+            StatementTimeout::for($pdo, $dialect)->within(Contexts::withBudget(1_500), static function () use ($pdo, $body, $error): never {
+                $body($pdo);
+
+                throw $error;
+            });
+        } catch (\RuntimeException $caught) {
             Assert::same($caught, $error);
 
             return;
         }
 
         throw new \LogicException('the callback error was expected');
+    }
+
+    public static function throwsKeptProvider(): iterable
+    {
+        $nothing = static function (FakePdo $pdo): void {};
+        $begin = static function (FakePdo $pdo): void {
+            $pdo->beginTransaction();
+        };
+        $beginAndCommit = static function (FakePdo $pdo): void {
+            $pdo->beginTransaction();
+            $pdo->commit();
+        };
+
+        yield 'postgresql, no transaction' => [new FakePdo('pgsql', current: '0'), Dialect::PostgreSql, $nothing];
+        yield 'postgresql, a transaction the callback ended' => [new FakePdo('pgsql', current: '0'), Dialect::PostgreSql, $beginAndCommit];
+        yield 'postgresql, entered inside a transaction' => [new FakePdo('pgsql', current: '0', transaction: true), Dialect::PostgreSql, $nothing];
+        yield 'mysql, a transaction left open' => [new FakePdo('mysql', current: 0), Dialect::MySql, $begin];
     }
 
     /**

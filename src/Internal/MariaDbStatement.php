@@ -36,16 +36,17 @@ final class MariaDbStatement
             return $head . 'max_statement_time=' . self::seconds($milliseconds) . ', ' . $variables . $for . $tail;
         }
 
-        $strictest = $milliseconds;
+        $strictest = self::seconds($milliseconds);
         foreach ($existing[1] as $value) {
-            // up, not to the nearest: 0.0004 s is a real limit, never 0 (none)
-            $valueMs = Decimal::ceilShifted($value, 3) ?? 0;
-            if ($valueMs > 0 && $valueMs < $strictest) {
-                $strictest = $valueMs;
+            // compared and kept exactly: 0.0004 s is a real limit, stricter
+            // than 1 ms, and never 0 (none)
+            $seconds = Decimal::normalize($value) ?? '0';
+            if ($seconds !== '0' && Decimal::compare($seconds, $strictest) < 0) {
+                $strictest = $seconds;
             }
         }
 
-        $variables = (string) preg_replace(self::VARIABLE, 'max_statement_time=' . self::seconds($strictest), $variables);
+        $variables = (string) preg_replace(self::VARIABLE, 'max_statement_time=' . $strictest, $variables);
 
         return $head . $variables . $for . $tail;
     }

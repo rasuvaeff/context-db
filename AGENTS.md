@@ -78,7 +78,11 @@ docker run --rm --network host -v "$PWD":/app -w /app \
   `within()` restored that onto the session. `Internal\Decimal` shifts and
   rounds the decimal string exactly; the previous session value is restored
   as the normalised string it was read as. Both bugs were found by property
-  and mutation tests before the first release.
+  and mutation tests before the first release. Limits are compared with
+  `Decimal::compare()` in the setting's own unit, never after rounding to
+  milliseconds: rounded up, 0.0004 s equalled a 1 ms budget and `within()`
+  loosened it to 0.001 for the scope; a previous limit equal to the budget is
+  kept, not replaced.
 - PostgreSQL: the previous value is read from `pg_settings.setting` (plain
   milliseconds, unlike `SHOW`'s "300ms"). Inside a PDO transaction
   `SET LOCAL` is used; a restore failing in an aborted transaction is
@@ -87,7 +91,10 @@ docker run --rm --network host -v "$PWD":/app -w /app \
   `set_config(…, false)` and `RESET` are all undone by a rollback of the
   transaction they ran in. A `within()` entered outside a transaction whose
   callback returns with one open is therefore refused (`LogicException`) —
-  never try to "restore harder" there. `transaction()` owns the transaction
+  never try to "restore harder" there. A callback that throws with one open
+  is refused the same way, its error kept as `previous` (owner decision
+  2026-11-27: an explicit refusal, not a restore after the caller's
+  rollback); never roll back that foreign transaction. `transaction()` owns the transaction
   and relies on `SET LOCAL` ending with it. MySQL/MariaDB session variables
   are not transactional; `ServerTimeoutIntegrationTest` pins both facts on
   live servers.
